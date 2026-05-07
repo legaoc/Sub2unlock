@@ -1,0 +1,12 @@
+{
+  "name": "sub2unlock-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "node-telegram-bot-api": "^0.67.0",
+    "firebase-admin": "^13.8.0"
+  }
+}
