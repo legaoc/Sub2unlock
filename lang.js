@@ -1,0 +1,65 @@
+export const langs = {
+es: {
+start_welcome: “👋 ¡Hola! Soy el sistema de verificación de enlaces.\n\n🔒 Este bot es de acceso privado.\n\n• Si tienes una Clave Única: `/activar TU_CLAVE`\n• Si ya tienes acceso: `/menu`”,
+choose_language: “🌐 *Elige tu idioma / Choose your language:*”,
+language_set: “✅ Idioma establecido en *Español*.”,
+menu_title: “👤 *Menú del Creador*\n\n¿Qué deseas hacer?”,
+menu_status: “📊 Mi Estado VIP”,
+menu_links: “🔗 Mis Enlaces”,
+menu_create: “➕ Crear Nuevo Enlace”,
+menu_back: “🔙 Volver al menú”,
+access_denied: “🔒 *Acceso Denegado*\n\nNecesitas una Clave VIP activa o tu membresía venció.”,
+access_pending: “⏳ *Tu solicitud está pendiente de aprobación.*\n\nEl administrador revisará tu acceso pronto.”,
+unauthorized: “⛔ Comando no autorizado.”,
+invalid_link: “❌ El enlace es inválido o ya no existe.”,
+content_locked_single: “🔒 *Contenido Bloqueado*\n\nPara acceder, debes suscribirte al canal oficial.”,
+content_locked_multi: (n) => `🔒 *Contenido Bloqueado*\n\nDebes suscribirte a los *${n} canales* para acceder:`,
+subscribe_btn: (canal) => `📢 Suscribirse a ${canal}`,
+verify_btn: “✅ Ya me suscribí a todos (Verificar)”,
+verify_success: (contenido) => `🎉 *¡Verificación exitosa!*\n\nAquí tienes tu contenido:\n\n${contenido}`,
+verify_fail: (canal) => `❌ Aún no estás en ${canal}.`,
+verify_error: “❌ Error de verificación. El bot debe ser administrador del canal.”,
+error_generic: “❌ Hubo un error. Intenta de nuevo.”,
+key_not_found: “❌ La clave no existe. Revisa que esté bien escrita.”,
+key_used: “❌ Esta clave ya fue utilizada.”,
+key_valid: “✅ *¡Clave válida!*\n\nTu solicitud fue enviada al administrador.\nTe notificaré cuando esté activa.”,
+key_generated: (clave) => `🗝️ *Clave generada:*\n\n\`${clave}`\n\nEl receptor tendrá *30 días VIP* pendientes de tu aprobación.`, key_error: "❌ Error al generar la clave.", cancel_ok: "✅ Proceso cancelado. Escribe /menu para volver.", cancel_none: "No hay ningún proceso activo que cancelar.", approved_notify: "🎉 *¡Tu acceso VIP fue aprobado!*\n\nYa puedes usar /menu.", rejected_notify: "❌ *Tu solicitud fue rechazada.*\n\nContacta al administrador.", status_title: "📊 *Tu Estado VIP*\n", status_active: "✅ Activo", status_pending_label: "⏳ Pendiente de aprobación", status_inactive: "❌ Inactivo", status_member_since: "Miembro desde:", status_expires: "Vence:", no_links: "🔗 *Mis Enlaces*\n\nNo tienes enlaces creados todavía. Usa ➕ Crear Nuevo Enlace.", links_title: (n) => `🔗 *Mis Enlaces* (${n} total)\n`, delete_confirm: (id) => `🗑️ *¿Eliminar este enlace?*\n\nID: `${id}`\n\nEsta acción es irreversible.`, delete_yes: "✅ Sí, eliminar", delete_cancel: "❌ Cancelar", delete_ok: (id) => `✅ Enlace `${id}` eliminado correctamente.`, delete_no_perm: "❌ No tienes permiso para eliminar este enlace.", delete_btn: (id) => `🗑️ Eliminar ${id}`, prev: "⬅️ Anterior", next: "Siguiente ➡️", create_step1_empty: "⚙️ *Crear nuevo enlace*\n\nPaso 1️⃣ — *Canales requeridos*\n\nEscribe el @usuario del primer canal.\n_(El usuario debe estar en TODOS los canales para recibir el contenido)_\n\n⚠️ Agrega el bot como Administrador en cada canal.", create_step1_list: (lista) => `⚙️ *Crear nuevo enlace*\n\nPaso 1️⃣ — *Canales requeridos*\n\n✅ Canales añadidos:\n${lista}\n\nEscribe otro @canal o toca *✅ Listo* para continuar.`, create_channel_invalid: "❌ El canal debe comenzar con @ (Ejemplo: @MiCanalVIP)", create_channel_duplicate: (c) => `⚠️ El canal ${c} ya está en la lista.`, create_channels_done: "✅ Listo, agregar contenido", create_need_channel: "⚠️ Debes agregar al menos un canal antes de continuar.", create_step2: (lista) => `✅ *Canales configurados:*\n${lista}\n\nPaso 2️⃣ — Escribe el contenido que recibirán al suscribirse.\n_(Link, contraseña, texto, etc.)_`, create_success: (enlace, lista) => `🚀 *¡Enlace protegido creado!*\n\n🔗 Comparte este enlace:\n`${enlace}`\n\n📢 Canales requeridos:\n${lista}`, create_error: "❌ Error al guardar el enlace. Intenta de nuevo.", cancel_process: "❌ Cancelar proceso", panel_title: "🛡️ *Panel God Mode*\n\nSelecciona una opción:", panel_pending_btn: (n) => `⏳ Aprobaciones pendientes (${n})`, panel_creators_btn: "👥 Ver Creadores VIP", panel_gen_key_btn: "🗝️ Generar Clave VIP", pending_none: "✅ No hay solicitudes pendientes.", pending_title: (n) => `⏳ *Solicitudes Pendientes* (${n})\n`, approve_btn: (uid) => `✅ Aprobar ${uid}`, reject_btn: (uid) => `❌ Rechazar ${uid}`, approved_admin: (uid) => `✅ *Creador `${uid}` aprobado.*`, rejected_admin: (uid) => `❌ *Creador `${uid}` rechazado.*`, creators_none: "👥 No hay creadores activos todavía.", creators_title: (n) => `👥 *Creadores VIP Activos* (${n})\n`, manage_btn: (uid) => `👤 Gestionar ${uid}`, creator_detail: (uid, activo, ingreso, venc, tiempo) => `👤 *Creador:* `${uid}`\n📊 Estado: ${activo}\n📅 Ingreso: ${ingreso}\n⏳ Vencimiento: ${venc}\n${tiempo}\n\n⏱️ *Agregar tiempo:*`, deactivate_btn: "🚫 Desactivar VIP", reactivate_btn: "✅ Reactivar VIP", back_list: "🔙 Volver a la lista", admin_notify: (userId) => `🔔 *Solicitud de acceso VIP*\n\nUn usuario quiere ser creador y está pendiente de tu aprobación.\nID de Telegram: `${userId}`\n\n¿Apruebas el acceso?`, approve_btn_admin: "✅ Aprobar", reject_btn_admin: "❌ Rechazar", time_expired: "🔴 Vencido", time_days: (d, h) => `🟢 ${d}d ${h}h restantes`, time_hours: (h) => `🟡 ${h}h restantes`,
+time_unknown: “❓ Sin fecha”,
+no_date: “Sin fecha”,
+},
+
+en: {
+start_welcome: “👋 Hello! I’m the link verification system.\n\n🔒 This bot is private access only.\n\n• If you have a Unique Key: `/activate YOUR_KEY`\n• If you already have access: `/menu`”,
+choose_language: “🌐 *Elige tu idioma / Choose your language:*”,
+language_set: “✅ Language set to *English*.”,
+menu_title: “👤 *Creator Menu*\n\nWhat would you like to do?”,
+menu_status: “📊 My VIP Status”,
+menu_links: “🔗 My Links”,
+menu_create: “➕ Create New Link”,
+menu_back: “🔙 Back to menu”,
+access_denied: “🔒 *Access Denied*\n\nYou need an active VIP Key or your membership has expired.”,
+access_pending: “⏳ *Your request is pending approval.*\n\nThe administrator will review your access soon.”,
+unauthorized: “⛔ Unauthorized command.”,
+invalid_link: “❌ The link is invalid or no longer exists.”,
+content_locked_single: “🔒 *Content Locked*\n\nTo access, you must subscribe to the official channel.”,
+content_locked_multi: (n) => `🔒 *Content Locked*\n\nYou must subscribe to all *${n} channels* to access:`,
+subscribe_btn: (canal) => `📢 Subscribe to ${canal}`,
+verify_btn: “✅ I’ve subscribed to all (Verify)”,
+verify_success: (contenido) => `🎉 *Verification successful!*\n\nHere's your content:\n\n${contenido}`,
+verify_fail: (canal) => `❌ You are not in ${canal} yet.`,
+verify_error: “❌ Verification error. The bot must be an admin of the channel.”,
+error_generic: “❌ An error occurred. Please try again.”,
+key_not_found: “❌ The key doesn’t exist. Check that it’s correct.”,
+key_used: “❌ This key has already been used.”,
+key_valid: “✅ *Valid key!*\n\nYour request has been sent to the administrator.\nI’ll notify you when it’s active.”,
+key_generated: (clave) => `🗝️ *Key generated:*\n\n\`${clave}`\n\nThe recipient will have *30 VIP days* pending your approval.`, key_error: "❌ Error generating the key.", cancel_ok: "✅ Process cancelled. Type /menu to go back.", cancel_none: "There is no active process to cancel.", approved_notify: "🎉 *Your VIP access has been approved!*\n\nYou can now use /menu.", rejected_notify: "❌ *Your request was rejected.*\n\nContact the administrator.", status_title: "📊 *Your VIP Status*\n", status_active: "✅ Active", status_pending_label: "⏳ Pending approval", status_inactive: "❌ Inactive", status_member_since: "Member since:", status_expires: "Expires:", no_links: "🔗 *My Links*\n\nYou have no links yet. Use ➕ Create New Link.", links_title: (n) => `🔗 *My Links* (${n} total)\n`, delete_confirm: (id) => `🗑️ *Delete this link?*\n\nID: `${id}`\n\nThis action is irreversible.`, delete_yes: "✅ Yes, delete", delete_cancel: "❌ Cancel", delete_ok: (id) => `✅ Link `${id}` deleted successfully.`, delete_no_perm: "❌ You don't have permission to delete this link.", delete_btn: (id) => `🗑️ Delete ${id}`, prev: "⬅️ Previous", next: "Next ➡️", create_step1_empty: "⚙️ *Create new link*\n\nStep 1️⃣ — *Required channels*\n\nType the @username of the first channel.\n_(The user must be in ALL channels to receive the content)_\n\n⚠️ Add the bot as Administrator in each channel.", create_step1_list: (lista) => `⚙️ *Create new link*\n\nStep 1️⃣ — *Required channels*\n\n✅ Channels added:\n${lista}\n\nType another @channel or tap *✅ Done* to continue.`, create_channel_invalid: "❌ The channel must start with @ (Example: @MyVIPChannel)", create_channel_duplicate: (c) => `⚠️ Channel ${c} is already in the list.`, create_channels_done: "✅ Done, add content", create_need_channel: "⚠️ You must add at least one channel before continuing.", create_step2: (lista) => `✅ *Channels configured:*\n${lista}\n\nStep 2️⃣ — Write the content subscribers will receive.\n_(Link, password, text, etc.)_`, create_success: (enlace, lista) => `🚀 *Protected link created!*\n\n🔗 Share this link:\n`${enlace}`\n\n📢 Required channels:\n${lista}`, create_error: "❌ Error saving the link. Please try again.", cancel_process: "❌ Cancel process", panel_title: "🛡️ *God Mode Panel*\n\nSelect an option:", panel_pending_btn: (n) => `⏳ Pending approvals (${n})`, panel_creators_btn: "👥 View VIP Creators", panel_gen_key_btn: "🗝️ Generate VIP Key", pending_none: "✅ No pending requests.", pending_title: (n) => `⏳ *Pending Requests* (${n})\n`, approve_btn: (uid) => `✅ Approve ${uid}`, reject_btn: (uid) => `❌ Reject ${uid}`, approved_admin: (uid) => `✅ *Creator `${uid}` approved.*`, rejected_admin: (uid) => `❌ *Creator `${uid}` rejected.*`, creators_none: "👥 No active creators yet.", creators_title: (n) => `👥 *Active VIP Creators* (${n})\n`, manage_btn: (uid) => `👤 Manage ${uid}`, creator_detail: (uid, activo, ingreso, venc, tiempo) => `👤 *Creator:* `${uid}`\n📊 Status: ${activo}\n📅 Joined: ${ingreso}\n⏳ Expires: ${venc}\n${tiempo}\n\n⏱️ *Add time:*`, deactivate_btn: "🚫 Deactivate VIP", reactivate_btn: "✅ Reactivate VIP", back_list: "🔙 Back to list", admin_notify: (userId) => `🔔 *VIP Access Request*\n\nA user wants to be a creator and is pending your approval.\nTelegram ID: `${userId}`\n\nDo you approve access?`, approve_btn_admin: "✅ Approve", reject_btn_admin: "❌ Reject", time_expired: "🔴 Expired", time_days: (d, h) => `🟢 ${d}d ${h}h remaining`, time_hours: (h) => `🟡 ${h}h remaining`,
+time_unknown: “❓ No date”,
+no_date: “No date”,
+}
+};
+
+export function t(lang, key, …args) {
+const str = langs[lang]?.[key] ?? langs[“es”][key];
+if (typeof str === “function”) return str(…args);
+return str ?? key;
+}
