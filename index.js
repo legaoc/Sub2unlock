@@ -10,6 +10,16 @@ if (!TOKEN) throw new Error("TOKEN environment variable is required.");
 if (!MI_ID_ADMIN) throw new Error("MI_ID_ADMIN environment variable is required.");
 
 const bot = new TelegramBot(TOKEN, { polling: true });
+
+const COMANDOS_MENU = [
+{ command: "start", description: "Iniciar el bot y elegir idioma" },
+{ command: "menu", description: "Mi panel de creador" },
+{ command: "activar", description: "Canjear una clave VIP" },
+{ command: "idioma", description: "Cambiar idioma" },
+{ command: "cancelar", description: "Cancelar la creación de un enlace" },
+];
+bot.setMyCommands(COMANDOS_MENU).catch((e) => console.error("Error al poner comandos:", e.message));
+bot.setMyCommands(COMANDOS_MENU, { language_code: "es" }).catch((e) => console.error("Error al poner comandos es:", e.message));
 const estadosCreacion = {};
 
 const estadosSoporte = {};
