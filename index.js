@@ -172,11 +172,15 @@ inline_keyboard: [[
 }
 
 
-async function getCanalNoticias() {
+async function getCanalesObligatorios() {
 try {
 const doc = await db.collection("config").doc("global").get();
-return doc.exists ? (doc.data()?.["canalNoticias"] ?? "") : "";
-} catch (error) { console.error(error); return ""; }
+if (!doc.exists) return [];
+const data = doc.data() ?? {};
+if (Array.isArray(data["canalesObligatorios"])) return data["canalesObligatorios"];
+if (data["canalNoticias"]) return [data["canalNoticias"]];
+return [];
+} catch (error) { console.error(error); return []; }
 }
 
 async function enMantenimiento() {
@@ -187,24 +191,28 @@ return doc.exists ? (doc.data()?.["activo"] ?? false) : false;
 }
 
 async function verificarCanalGlobal(userId) {
-const canal = await getCanalNoticias();
-if (!canal) return { ok: true, canal: "" };
+const canales = await getCanalesObligatorios();
+if (canales.length === 0) return { ok: true, canal: "", faltantes: [] };
+const faltantes = [];
+for (const canal of canales) {
 try {
 const miembro = await bot.getChatMember(canal, userId);
 const estado = miembro?.status;
-return { ok: estado === "member" || estado === "administrator" || estado === "creator", canal };
-} catch (error) { return { ok: true, canal }; }
+if (!(estado === "member" || estado === "administrator" || estado === "creator")) faltantes.push(canal);
+} catch (error) {}
+}
+return { ok: faltantes.length === 0, canal: faltantes[0] ?? "", faltantes };
 }
 
 async function exigeCanalGlobal(chatId, userId, lang) {
-const { ok, canal } = await verificarCanalGlobal(userId);
+const { ok, faltantes } = await verificarCanalGlobal(userId);
 if (ok) return true;
-await bot.sendMessage(chatId, t(lang, "global_gate", canal), {
+const lista = faltantes.join(", ");
+const botones = faltantes.map((c) => [{ text: t(lang, "global_join_btn", c), url: `https://t.me/${c.replace("@", "")}` }]);
+botones.push([{ text: t(lang, "global_verify_btn"), callback_data: "check_global" }]);
+await bot.sendMessage(chatId, t(lang, "global_gate", lista), {
 parse_mode: "Markdown",
-reply_markup: { inline_keyboard: [
-[{ text: t(lang, "global_join_btn", canal), url: `https://t.me/${canal.replace("@", "")}` }],
-[{ text: t(lang, "global_verify_btn"), callback_data: "check_global" }],
-] },
+reply_markup: { inline_keyboard: botones },
 });
 return false;
 }
@@ -507,16 +515,32 @@ return void mostrarPanelPrincipal(chatId);
 }
 
 if (estadosCanal[chatId] && userId === MI_ID_ADMIN && texto) {
+if (texto === "/listo") {
+delete estadosCanal[chatId];
+const actuales = await getCanalesObligatorios();
+await bot.sendMessage(chatId, t(lang, "canal_set", actuales.length ? actuales.join("\n") : "—"), { parse_mode: "Markdown" });
+return;
+}
 if (texto === "/quitar") {
 delete estadosCanal[chatId];
-await db.collection("config").doc("global").set({ canalNoticias: "" }, { merge: true });
+await db.collection("config").doc("global").set({ canalesObligatorios: [] }, { merge: true });
 await bot.sendMessage(chatId, t(lang, "canal_removed"));
 return;
 }
+if (texto.startsWith("/quitar @")) {
+const quitar = texto.replace("/quitar ", "").trim();
+const actuales = await getCanalesObligatorios();
+const nuevos = actuales.filter((c) => c !== quitar);
+await db.collection("config").doc("global").set({ canalesObligatorios: nuevos }, { merge: true });
+await bot.sendMessage(chatId, t(lang, "canal_set", nuevos.length ? nuevos.join("\n") : "—"), { parse_mode: "Markdown" });
+return;
+}
 if (texto.startsWith("@")) {
-delete estadosCanal[chatId];
-await db.collection("config").doc("global").set({ canalNoticias: texto.trim() }, { merge: true });
-await bot.sendMessage(chatId, t(lang, "canal_set", texto.trim()), { parse_mode: "Markdown" });
+const actuales = await getCanalesObligatorios();
+const canal = texto.trim();
+if (!actuales.includes(canal)) actuales.push(canal);
+await db.collection("config").doc("global").set({ canalesObligatorios: actuales }, { merge: true });
+await bot.sendMessage(chatId, t(lang, "canal_set", actuales.join("\n")), { parse_mode: "Markdown" });
 return;
 }
 }
@@ -662,12 +686,12 @@ const newLang = data === "set_lang_es" ? "es" : "en";
 await setLang(userId, newLang);
 const gate = await verificarCanalGlobal(userId);
 if (!gate.ok) {
-await bot.editMessageText(t(newLang, "global_gate", gate.canal), {
+const lista = gate.faltantes.join(", ");
+const botonesGate = gate.faltantes.map((c) => [{ text: t(newLang, "global_join_btn", c), url: `https://t.me/${c.replace("@", "")}` }]);
+botonesGate.push([{ text: t(newLang, "global_verify_btn"), callback_data: "check_global" }]);
+await bot.editMessageText(t(newLang, "global_gate", lista), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
-reply_markup: { inline_keyboard: [
-[{ text: t(newLang, "global_join_btn", gate.canal), url: `https://t.me/${gate.canal.replace("@", "")}` }],
-[{ text: t(newLang, "global_verify_btn"), callback_data: "check_global" }],
-] },
+reply_markup: { inline_keyboard: botonesGate },
 });
 return;
 }
@@ -719,9 +743,9 @@ return;
 }
 
 if (data === "check_global") {
-const { ok, canal } = await verificarCanalGlobal(userId);
+const { ok, faltantes } = await verificarCanalGlobal(userId);
 if (!ok) {
-await bot.sendMessage(chatId, t(lang, "global_not_yet", canal));
+await bot.sendMessage(chatId, t(lang, "global_not_yet", faltantes.join(", ")));
 return;
 }
 await bot.sendMessage(chatId, t(lang, "global_ok"));
@@ -1040,8 +1064,8 @@ return;
 
 if (data === "panel_canal") {
 try {
-const canal = await getCanalNoticias();
-await bot.editMessageText((canal ? t(lang, "canal_current", canal) + "\n\n" : "") + t(lang, "canal_ask"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
+const canales = await getCanalesObligatorios();
+await bot.editMessageText((canales.length ? t(lang, "canal_current", canales.join("\n")) + "\n\n" : "") + t(lang, "canal_ask"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
 estadosCanal[chatId] = true;
 } catch (error) { console.error(error); }
 return;
