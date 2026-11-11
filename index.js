@@ -1,6 +1,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import { db, firebaseAdmin } from "./firebase.js";
 import { t } from "./lang.js";
+import XLSX from "xlsx";
 
 const TOKEN = process.env["TOKEN"];
 const MI_ID_ADMIN = parseInt(process.env["MI_ID_ADMIN"] ?? "0");
@@ -23,6 +24,10 @@ bot.setMyCommands(COMANDOS_MENU, { language_code: "es" }).catch((e) => console.e
 const estadosCreacion = {};
 
 const estadosSoporte = {};
+const estadosCaptcha = {};
+const estadosCanal = {};
+const DIAS_POR_REFERIDO = 3;
+const MINUTOS_AUTOBORRADO = 5;
 
 function nombreUsuario(from) {
 return from?.username ? `@${from.username}` : (from?.first_name ?? "usuario");
@@ -166,6 +171,95 @@ inline_keyboard: [[
 });
 }
 
+
+async function getCanalNoticias() {
+try {
+const doc = await db.collection("config").doc("global").get();
+return doc.exists ? (doc.data()?.["canalNoticias"] ?? "") : "";
+} catch (error) { console.error(error); return ""; }
+}
+
+async function enMantenimiento() {
+try {
+const doc = await db.collection("config").doc("mantenimiento").get();
+return doc.exists ? (doc.data()?.["activo"] ?? false) : false;
+} catch (error) { console.error(error); return false; }
+}
+
+async function verificarCanalGlobal(userId) {
+const canal = await getCanalNoticias();
+if (!canal) return { ok: true, canal: "" };
+try {
+const miembro = await bot.getChatMember(canal, userId);
+const estado = miembro?.status;
+return { ok: estado === "member" || estado === "administrator" || estado === "creator", canal };
+} catch (error) { return { ok: true, canal }; }
+}
+
+async function exigeCanalGlobal(chatId, userId, lang) {
+const { ok, canal } = await verificarCanalGlobal(userId);
+if (ok) return true;
+await bot.sendMessage(chatId, t(lang, "global_gate", canal), {
+parse_mode: "Markdown",
+reply_markup: { inline_keyboard: [
+[{ text: t(lang, "global_join_btn", canal), url: `https://t.me/${canal.replace("@", "")}` }],
+[{ text: t(lang, "global_verify_btn"), callback_data: "check_global" }],
+] },
+});
+return false;
+}
+
+function programarAutoborrado(chatId, messageId) {
+setTimeout(() => { bot.deleteMessage(chatId, messageId).catch(() => {}); }, MINUTOS_AUTOBORRADO * 60 * 1000);
+}
+
+async function enviarCaptcha(chatId, payload, lang) {
+const a = 2 + Math.floor(Math.random() * 8);
+const b = 2 + Math.floor(Math.random() * 8);
+const correcta = a + b;
+const opciones = new Set([correcta]);
+while (opciones.size < 4) {
+const c = correcta + Math.floor(Math.random() * 11) - 5;
+if (c > 0) opciones.add(c);
+}
+const lista = [...opciones].sort(() => Math.random() - 0.5);
+estadosCaptcha[chatId] = { payload, correcta };
+await bot.sendMessage(chatId, t(lang, "captcha_ask", a, b), {
+parse_mode: "Markdown",
+reply_markup: { inline_keyboard: [lista.map((v) => ({ text: String(v), callback_data: `captcha_${payload}_${v}` }))] },
+});
+}
+
+async function procesarDeepLink(chatId, userId, payload, lang, from) {
+try {
+const snap = await db.collection("enlaces").doc(payload).get();
+if (!snap.exists) return void bot.sendMessage(chatId, t(lang, "invalid_link"));
+const datos = snap.data();
+const bloqueo = enlaceBloqueado(datos);
+if (bloqueo === "expired") return void bot.sendMessage(chatId, t(lang, "link_expired"));
+if (bloqueo === "limit") return void bot.sendMessage(chatId, t(lang, "link_limit"));
+const canales = obtenerCanales(datos);
+const contenido = datos["contenido"];
+await db.collection("enlaces").doc(payload).update({ visitas: firebaseAdmin.firestore.FieldValue.increment(1) });
+const { aprobado, faltante } = await verificarTodosLosCanales(canales, userId);
+if (!aprobado && faltante) {
+const botonesCanales = canales.map((c) => [{ text: t(lang, "subscribe_btn", c), url: `https://t.me/${c.replace("@", "")}` }]);
+botonesCanales.push([{ text: t(lang, "verify_btn"), callback_data: `check_${payload}` }]);
+return void bot.sendMessage(chatId, canales.length > 1 ? t(lang, "content_locked_multi", canales.length) : t(lang, "content_locked_single"), {
+parse_mode: "Markdown", reply_markup: { inline_keyboard: botonesCanales },
+});
+}
+await db.collection("enlaces").doc(payload).update({ desbloqueos: firebaseAdmin.firestore.FieldValue.increment(1) });
+await registrarDesbloqueo(payload, datos, userId, from);
+const enviado = await bot.sendMessage(chatId, t(lang, "verify_success", contenido) + t(lang, "content_selfdestruct"), { parse_mode: "Markdown" });
+programarAutoborrado(chatId, enviado.message_id);
+return;
+} catch (error) {
+console.error("Error en deep link:", error);
+return void bot.sendMessage(chatId, t(lang, "error_generic"));
+}
+}
+
 async function mostrarMenuCreador(chatId, lang) {
 await bot.sendMessage(chatId, t(lang, "menu_title"), {
 parse_mode: "Markdown",
@@ -175,6 +269,7 @@ inline_keyboard: [
 [{ text: t(lang, "menu_links"), callback_data: "menu_enlaces_0" }],
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
 [{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
+[{ text: t(lang, "menu_referidos"), callback_data: "menu_referidos" }],
 [{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ],
 },
@@ -259,6 +354,10 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "panel_pending_btn", snap.size), callback_data: "panel_pendientes_0" }],
 [{ text: t(lang, "panel_creators_btn"), callback_data: "panel_creadores_0" }],
 [{ text: t(lang, "panel_gen_key_btn"), callback_data: "panel_generar_clave" }],
+[{ text: t(lang, "panel_stats_btn"), callback_data: "panel_stats" }],
+[{ text: t(lang, "panel_export_btn"), callback_data: "panel_export" }],
+[{ text: t(lang, "panel_canal_btn"), callback_data: "panel_canal" }],
+[{ text: t(lang, (await enMantenimiento()) ? "panel_maint_btn_on" : "panel_maint_btn_off"), callback_data: "panel_mantenimiento" }],
 ]},
 });
 }
@@ -407,33 +506,50 @@ if (userId !== MI_ID_ADMIN) return void bot.sendMessage(chatId, t(lang, "unautho
 return void mostrarPanelPrincipal(chatId);
 }
 
+if (estadosCanal[chatId] && userId === MI_ID_ADMIN && texto) {
+if (texto === "/quitar") {
+delete estadosCanal[chatId];
+await db.collection("config").doc("global").set({ canalNoticias: "" }, { merge: true });
+await bot.sendMessage(chatId, t(lang, "canal_removed"));
+return;
+}
+if (texto.startsWith("@")) {
+delete estadosCanal[chatId];
+await db.collection("config").doc("global").set({ canalNoticias: texto.trim() }, { merge: true });
+await bot.sendMessage(chatId, t(lang, "canal_set", texto.trim()), { parse_mode: "Markdown" });
+return;
+}
+}
+
+if (userId !== MI_ID_ADMIN && await enMantenimiento()) {
+return void bot.sendMessage(chatId, t(lang, "maintenance_msg"), { parse_mode: "Markdown" });
+}
+
 if (texto.startsWith("/start ")) {
 const payload = texto.split(" ")[1];
+if (payload.startsWith("ref_")) {
+const refId = payload.replace("ref_", "");
+if (refId && refId !== userId.toString()) {
 try {
-const snap = await db.collection("enlaces").doc(payload).get();
-if (!snap.exists) return void bot.sendMessage(chatId, t(lang, "invalid_link"));
-const datos = snap.data();
-const bloqueo = enlaceBloqueado(datos);
-if (bloqueo === "expired") return void bot.sendMessage(chatId, t(lang, "link_expired"));
-if (bloqueo === "limit") return void bot.sendMessage(chatId, t(lang, "link_limit"));
-const canales = obtenerCanales(datos);
-const contenido = datos["contenido"];
-await db.collection("enlaces").doc(payload).update({ visitas: firebaseAdmin.firestore.FieldValue.increment(1) });
-const { aprobado, faltante } = await verificarTodosLosCanales(canales, userId);
-if (!aprobado && faltante) {
-const botonesCanales = canales.map((c) => [{ text: t(lang, "subscribe_btn", c), url: `https://t.me/${c.replace("@", "")}` }]);
-botonesCanales.push([{ text: t(lang, "verify_btn"), callback_data: `check_${payload}` }]);
-return void bot.sendMessage(chatId, canales.length > 1 ? t(lang, "content_locked_multi", canales.length) : t(lang, "content_locked_single"), {
-parse_mode: "Markdown", reply_markup: { inline_keyboard: botonesCanales },
+const uRef = db.collection("usuarios").doc(userId.toString());
+const uDoc = await uRef.get();
+if (!uDoc.exists || !uDoc.data()?.["referidoPor"]) {
+await uRef.set({ referidoPor: refId }, { merge: true });
+}
+} catch (error) { console.error(error); }
+}
+await bot.sendMessage(chatId, t(lang, "choose_language"), {
+parse_mode: "Markdown",
+reply_markup: { inline_keyboard: [
+[{ text: "Espanol", callback_data: "set_lang_es" }],
+[{ text: "English", callback_data: "set_lang_en" }],
+] },
 });
+return;
 }
-await db.collection("enlaces").doc(payload).update({ desbloqueos: firebaseAdmin.firestore.FieldValue.increment(1) });
-await registrarDesbloqueo(payload, datos, userId, msg.from);
-return void bot.sendMessage(chatId, t(lang, "verify_success", contenido), { parse_mode: "Markdown" });
-} catch (error) {
-console.error("Error en deep link:", error);
-return void bot.sendMessage(chatId, t(lang, "error_generic"));
-}
+if (!await exigeCanalGlobal(chatId, userId, lang)) return;
+await enviarCaptcha(chatId, payload, lang);
+return;
 }
 
 if (texto === "/start") {
@@ -459,6 +575,7 @@ return;
 }
 
 if (texto === "/menu") {
+if (!await exigeCanalGlobal(chatId, userId, lang)) return;
 const vigente = await estaVigente(userId);
 if (!vigente) {
 const doc = await db.collection("creadores").doc(userId.toString()).get();
@@ -481,6 +598,7 @@ return void bot.sendMessage(chatId, t(lang, "key_error"));
 }
 
 if (texto.startsWith("/activar ") || texto.startsWith("/activate ")) {
+if (!await exigeCanalGlobal(chatId, userId, lang)) return;
 const clave = texto.split(" ")[1];
 try {
 const claveRef = db.collection("claves").doc(clave);
@@ -542,6 +660,17 @@ const lang = await getLang(userId);
 if (data === "set_lang_es" || data === "set_lang_en") {
 const newLang = data === "set_lang_es" ? "es" : "en";
 await setLang(userId, newLang);
+const gate = await verificarCanalGlobal(userId);
+if (!gate.ok) {
+await bot.editMessageText(t(newLang, "global_gate", gate.canal), {
+chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
+reply_markup: { inline_keyboard: [
+[{ text: t(newLang, "global_join_btn", gate.canal), url: `https://t.me/${gate.canal.replace("@", "")}` }],
+[{ text: t(newLang, "global_verify_btn"), callback_data: "check_global" }],
+] },
+});
+return;
+}
 await bot.editMessageText(t(newLang, "language_set") + "\n\n" + t(newLang, "start_welcome"), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [
@@ -559,6 +688,7 @@ return;
 }
 
 if (data === "probar_24h") {
+if (!await exigeCanalGlobal(chatId, userId, lang)) return;
 try {
 const ref = db.collection("creadores").doc(userId.toString());
 const doc = await ref.get();
@@ -583,6 +713,52 @@ await bot.sendMessage(chatId, t(lang, "support_ask"), { parse_mode: "Markdown" }
 return;
 }
 
+if (userId !== MI_ID_ADMIN && await enMantenimiento()) {
+void bot.answerCallbackQuery(query.id, { text: "Mantenimiento", show_alert: false });
+return;
+}
+
+if (data === "check_global") {
+const { ok, canal } = await verificarCanalGlobal(userId);
+if (!ok) {
+await bot.sendMessage(chatId, t(lang, "global_not_yet", canal));
+return;
+}
+await bot.sendMessage(chatId, t(lang, "global_ok"));
+await bot.sendMessage(chatId, t(lang, "start_welcome"), { parse_mode: "Markdown" });
+return;
+}
+
+if (data.startsWith("captcha_")) {
+const partes = data.split("_");
+const valor = parseInt(partes[partes.length - 1]);
+const payload = partes.slice(1, partes.length - 1).join("_");
+const estado = estadosCaptcha[chatId];
+if (!estado || estado.payload !== payload) return;
+if (valor === estado.correcta) {
+delete estadosCaptcha[chatId];
+try { await bot.deleteMessage(chatId, messageId); } catch (e) {}
+await bot.sendMessage(chatId, t(lang, "captcha_ok"));
+await procesarDeepLink(chatId, userId, payload, lang, query.from);
+} else {
+await bot.sendMessage(chatId, t(lang, "captcha_fail"));
+await enviarCaptcha(chatId, payload, lang);
+}
+return;
+}
+
+if (data === "menu_referidos") {
+try {
+const infoBot = await bot.getMe();
+const link = `https://t.me/${infoBot.username}?start=ref_${userId}`;
+const doc = await db.collection("creadores").doc(userId.toString()).get();
+const count = doc.exists ? (doc.data()?.["referidos"] ?? 0) : 0;
+const dias = doc.exists ? (doc.data()?.["diasGanados"] ?? 0) : 0;
+await bot.editMessageText(t(lang, "ref_title", link, count, dias), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "menu_main" }]] } });
+} catch (error) { console.error(error); }
+return;
+}
+
 if (data === "menu_main") {
 await bot.editMessageText(t(lang, "menu_title"), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
@@ -591,6 +767,7 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "menu_links"), callback_data: "menu_enlaces_0" }],
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
 [{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
+[{ text: t(lang, "menu_referidos"), callback_data: "menu_referidos" }],
 [{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ]},
 });
@@ -750,7 +927,8 @@ void bot.answerCallbackQuery(query.id, { text: t(lang, "verify_fail", faltante ?
 } else {
 await db.collection("enlaces").doc(payload).update({ desbloqueos: firebaseAdmin.firestore.FieldValue.increment(1) });
 await registrarDesbloqueo(payload, datos, userId, query.from);
-void bot.editMessageText(t(lang, "verify_success", datos["contenido"]), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" });
+void bot.editMessageText(t(lang, "verify_success", datos["contenido"]) + t(lang, "content_selfdestruct"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" });
+programarAutoborrado(chatId, messageId);
 }
 } catch (error) {
 console.error(error);
@@ -764,6 +942,22 @@ if (userId !== MI_ID_ADMIN) return;
 const uid = data.replace("aprobar_creador_", "");
 try {
 await db.collection("creadores").doc(uid).update({ activo: true, pendiente: false });
+try {
+const refSnap = await db.collection("usuarios").doc(uid).get();
+const referidoPor = refSnap.exists ? refSnap.data()?.["referidoPor"] : null;
+const aprobadoDoc = await db.collection("creadores").doc(uid).get();
+if (referidoPor && !aprobadoDoc.data()?.["refRecompensado"]) {
+const refDoc = db.collection("creadores").doc(referidoPor.toString());
+const refDocSnap = await refDoc.get();
+const base = refDocSnap.exists && refDocSnap.data()?.["fechaVencimiento"]?.toDate() > new Date() ? refDocSnap.data()["fechaVencimiento"].toDate() : new Date();
+const nuevaFecha = new Date(base);
+nuevaFecha.setDate(nuevaFecha.getDate() + DIAS_POR_REFERIDO);
+await refDoc.set({ activo: true, referidos: firebaseAdmin.firestore.FieldValue.increment(1), diasGanados: firebaseAdmin.firestore.FieldValue.increment(DIAS_POR_REFERIDO), fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(nuevaFecha), avisoVencimiento: false }, { merge: true });
+await db.collection("creadores").doc(uid).update({ refRecompensado: true });
+const rLang = await getLang(parseInt(referidoPor));
+await bot.sendMessage(parseInt(referidoPor), t(rLang, "ref_reward_notify", uid, DIAS_POR_REFERIDO), { parse_mode: "Markdown" });
+}
+} catch (error) { console.error("Error al recompensar referido:", error); }
 await bot.editMessageText(t(lang, "approved_admin", uid), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" });
 const uLang = await getLang(parseInt(uid));
 await bot.sendMessage(parseInt(uid), t(uLang, "approved_notify"), { parse_mode: "Markdown" });
@@ -789,6 +983,69 @@ if (data === "panel_main") { await mostrarPanelPrincipal(chatId); return; }
 if (data.startsWith("panel_pendientes_")) { await mostrarPendientes(chatId, messageId, parseInt(data.replace("panel_pendientes_", "")) || 0); return; }
 if (data.startsWith("panel_creadores_")) { await mostrarListaCreadores(chatId, messageId, parseInt(data.replace("panel_creadores_", "")) || 0); return; }
 if (data.startsWith("panel_creator_")) { await mostrarCreadorAdmin(chatId, messageId, data.replace("panel_creator_", "")); return; }
+
+if (data === "panel_stats") {
+try {
+const [uSnap, cSnap, eSnap, dSnap] = await Promise.all([
+db.collection("usuarios").get(),
+db.collection("creadores").where("activo", "==", true).get(),
+db.collection("enlaces").get(),
+db.collection("desbloqueos").get(),
+]);
+const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+const hoySnap = await db.collection("desbloqueos").where("fecha", ">=", firebaseAdmin.firestore.Timestamp.fromDate(hoy)).get();
+const porCreador = {};
+eSnap.docs.forEach((d) => { const c = d.data()["creador"]; porCreador[c] = (porCreador[c] ?? 0) + (d.data()["desbloqueos"] ?? 0); });
+let topId = ""; let topN = 0;
+Object.entries(porCreador).forEach(([id, n]) => { if (n > topN) { topN = n; topId = id; } });
+const lineas = [t(lang, "stats_global_title"), t(lang, "stats_users", uSnap.size), t(lang, "stats_creators", cSnap.size), t(lang, "stats_links", eSnap.size), t(lang, "stats_unlocks", dSnap.size), t(lang, "stats_unlocks_today", hoySnap.size)];
+lineas.push(topId ? t(lang, "stats_top_creator", topId, topN) : t(lang, "stats_none"));
+await bot.editMessageText(lineas.join("\n"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data === "panel_export") {
+try {
+await bot.editMessageText(t(lang, "export_generating"), { chat_id: chatId, message_id: messageId });
+const [uSnap, eSnap, dSnap] = await Promise.all([
+db.collection("usuarios").limit(1000).get(),
+db.collection("enlaces").limit(1000).get(),
+db.collection("desbloqueos").limit(1000).get(),
+]);
+const fmt = (ts) => ts?.toDate ? ts.toDate().toISOString() : "";
+const usuarios = uSnap.docs.map((d) => ({ id: d.id, idioma: d.data()["lang"] ?? "", referidoPor: d.data()["referidoPor"] ?? "" }));
+const enlaces = eSnap.docs.map((d) => ({ id: d.id, creador: d.data()["creador"] ?? "", canales: (d.data()["canales"] ?? []).join(", "), visitas: d.data()["visitas"] ?? 0, desbloqueos: d.data()["desbloqueos"] ?? 0, expiraEl: fmt(d.data()["expiraEl"]), limiteUsos: d.data()["limiteUsos"] ?? "", fecha: fmt(d.data()["fecha"]) }));
+const desbloqueos = dSnap.docs.map((d) => ({ enlaceId: d.data()["enlaceId"] ?? "", creador: d.data()["creador"] ?? "", userId: d.data()["userId"] ?? "", nombre: d.data()["nombre"] ?? "", fecha: fmt(d.data()["fecha"]) }));
+const wb = XLSX.utils.book_new();
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(usuarios), "Usuarios");
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(enlaces), "Enlaces");
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(desbloqueos), "Desbloqueos");
+const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+await bot.sendDocument(chatId, buf, { caption: t(lang, "export_ready") }, { filename: "sub2unlock-datos.xlsx", contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+} catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "export_error")); }
+return;
+}
+
+if (data === "panel_mantenimiento") {
+try {
+const ref = db.collection("config").doc("mantenimiento");
+const doc = await ref.get();
+const nuevo = !(doc.exists && doc.data()?.["activo"]);
+await ref.set({ activo: nuevo }, { merge: true });
+await bot.editMessageText(nuevo ? t(lang, "maint_on") : t(lang, "maint_off"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data === "panel_canal") {
+try {
+const canal = await getCanalNoticias();
+await bot.editMessageText((canal ? t(lang, "canal_current", canal) + "\n\n" : "") + t(lang, "canal_ask"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
+estadosCanal[chatId] = true;
+} catch (error) { console.error(error); }
+return;
+}
 
 if (data === "panel_generar_clave") {
 await bot.editMessageText(t(lang, "key_choose_days"), {
