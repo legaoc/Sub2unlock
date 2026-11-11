@@ -11,6 +11,64 @@ if (!MI_ID_ADMIN) throw new Error("MI_ID_ADMIN environment variable is required.
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 const estadosCreacion = {};
+
+const estadosSoporte = {};
+
+function nombreUsuario(from) {
+return from?.username ? `@${from.username}` : (from?.first_name ?? "usuario");
+}
+
+async function registrarDesbloqueo(enlaceId, datos, userId, from) {
+try {
+const nombre = nombreUsuario(from);
+await db.collection("desbloqueos").add({
+enlaceId, creador: datos["creador"], userId, nombre,
+fecha: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+});
+const total = (datos["desbloqueos"] ?? 0) + 1;
+try {
+await bot.sendMessage(datos["creador"], t(await getLang(datos["creador"]), "unlock_notify", nombre, enlaceId, total), { parse_mode: "Markdown" });
+} catch (e) {}
+} catch (error) { console.error("Error al registrar desbloqueo:", error); }
+}
+
+function enlaceBloqueado(datos) {
+const ahora = new Date();
+const expira = datos["expiraEl"];
+if (expira && expira.toDate() <= ahora) return "expired";
+const limite = datos["limiteUsos"];
+if (typeof limite === "number" && limite > 0 && (datos["desbloqueos"] ?? 0) >= limite) return "limit";
+return null;
+}
+
+async function guardarEnlace(chatId, userId, estado, limite) {
+const canalesGuardados = [...estado.canales];
+const hLang = estado.lang ?? "es";
+const idUnico = "prod_" + Date.now();
+const docData = {
+canales: canalesGuardados, canal: canalesGuardados[0], contenido: estado.contenido,
+creador: userId, visitas: 0, desbloqueos: 0,
+fecha: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+};
+let limiteTxt = t(hLang, "limit_none");
+if (limite && limite.tipo === "exp") {
+docData["expiraEl"] = firebaseAdmin.firestore.Timestamp.fromDate(new Date(Date.now() + limite.dias * 24 * 60 * 60 * 1000));
+limiteTxt = limite.dias === 1 ? t(hLang, "limit_exp_1d") : (limite.dias === 7 ? t(hLang, "limit_exp_7d") : t(hLang, "limit_exp_30d"));
+} else if (limite && limite.tipo === "uses") {
+docData["limiteUsos"] = limite.usos;
+limiteTxt = limite.usos === 10 ? t(hLang, "limit_uses_10") : (limite.usos === 50 ? t(hLang, "limit_uses_50") : t(hLang, "limit_uses_100"));
+}
+try {
+await db.collection("enlaces").doc(idUnico).set(docData);
+const infoBot = await bot.getMe();
+const enlace = `https://t.me/${infoBot.username}?start=${idUnico}`;
+const listaStr = canalesGuardados.map((c, i) => `   ${i + 1}. ${c}`).join("\n");
+await bot.sendMessage(chatId, t(hLang, "create_success", enlace, listaStr, limiteTxt), { parse_mode: "Markdown" });
+} catch (error) {
+console.error(error);
+await bot.sendMessage(chatId, t(hLang, "create_error"));
+}
+}
 const langCache = {};
 
 console.log("Sub2Unlock Bot iniciado.");
@@ -106,6 +164,8 @@ inline_keyboard: [
 [{ text: t(lang, "menu_status"), callback_data: "menu_status" }],
 [{ text: t(lang, "menu_links"), callback_data: "menu_enlaces_0" }],
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
+[{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
+[{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ],
 },
 });
@@ -164,7 +224,7 @@ const canales = obtenerCanales(data);
 const visitas = data["visitas"] ?? 0;
 const desbloqueos = data["desbloqueos"] ?? 0;
 const fechaStr = data["fecha"] ? data["fecha"].toDate().toLocaleDateString(lang === "en" ? "en-US" : "es-ES") : "–";
-lineas.push(`/link\`${doc.id}\`\n   ${canales.join(" + ")}\n   ${fechaStr} | v:${visitas} d:${desbloqueos} (${tasaConversion(visitas, desbloqueos)})`); botones.push([{ text: t(lang, "delete_btn", doc.id), callback_data: `del_confirm_${doc.id}` }]);
+lineas.push(`/link\`${doc.id}\`\n   ${canales.join(" + ")}\n   ${fechaStr} | v:${visitas} d:${desbloqueos} (${tasaConversion(visitas, desbloqueos)})`); botones.push([{ text: "📊", callback_data: `stats_${doc.id}` }, { text: t(lang, "delete_btn", doc.id), callback_data: `del_confirm_${doc.id}` }]);
 }
 
 const navRow = [];
@@ -281,6 +341,21 @@ const botones = [
 { text: "+90d", callback_data: `add_time_${uid}_90_dia` },
 { text: "+365d", callback_data: `add_time_${uid}_365_dia` },
 ],
+[
+{ text: "-1h", callback_data: `add_time_${uid}_-1_hora` },
+{ text: "-6h", callback_data: `add_time_${uid}_-6_hora` },
+{ text: "-12h", callback_data: `add_time_${uid}_-12_hora` },
+],
+[
+{ text: "-1d", callback_data: `add_time_${uid}_-1_dia` },
+{ text: "-7d", callback_data: `add_time_${uid}_-7_dia` },
+{ text: "-15d", callback_data: `add_time_${uid}_-15_dia` },
+],
+[
+{ text: "-30d", callback_data: `add_time_${uid}_-30_dia` },
+{ text: "-90d", callback_data: `add_time_${uid}_-90_dia` },
+{ text: "-365d", callback_data: `add_time_${uid}_-365_dia` },
+],
 [activo
 ? { text: t(lang, "deactivate_btn"), callback_data: `toggle_creator_${uid}_false` }
 : { text: t(lang, "reactivate_btn"), callback_data: `toggle_creator_${uid}_true` }
@@ -300,6 +375,23 @@ const userId = msg.from?.id;
 if (!userId) return;
 const lang = await getLang(userId);
 
+if (estadosSoporte[chatId] && texto && !texto.startsWith("/")) {
+delete estadosSoporte[chatId];
+try {
+await bot.forwardMessage(MI_ID_ADMIN, chatId, msg.message_id);
+await bot.sendMessage(chatId, t(lang, "support_sent"));
+} catch (error) { console.error(error); }
+return;
+}
+
+if (userId === MI_ID_ADMIN && msg.reply_to_message?.forward_from && texto && !texto.startsWith("/")) {
+try {
+await bot.sendMessage(msg.reply_to_message.forward_from.id, texto);
+await bot.sendMessage(chatId, t(lang, "support_reply_sent"));
+} catch (error) { console.error(error); }
+return;
+}
+
 if (texto === PALABRA_MAGICA) {
 if (userId !== MI_ID_ADMIN) return void bot.sendMessage(chatId, t(lang, "unauthorized"));
 return void mostrarPanelPrincipal(chatId);
@@ -311,6 +403,9 @@ try {
 const snap = await db.collection("enlaces").doc(payload).get();
 if (!snap.exists) return void bot.sendMessage(chatId, t(lang, "invalid_link"));
 const datos = snap.data();
+const bloqueo = enlaceBloqueado(datos);
+if (bloqueo === "expired") return void bot.sendMessage(chatId, t(lang, "link_expired"));
+if (bloqueo === "limit") return void bot.sendMessage(chatId, t(lang, "link_limit"));
 const canales = obtenerCanales(datos);
 const contenido = datos["contenido"];
 await db.collection("enlaces").doc(payload).update({ visitas: firebaseAdmin.firestore.FieldValue.increment(1) });
@@ -323,6 +418,7 @@ parse_mode: "Markdown", reply_markup: { inline_keyboard: botonesCanales },
 });
 }
 await db.collection("enlaces").doc(payload).update({ desbloqueos: firebaseAdmin.firestore.FieldValue.increment(1) });
+await registrarDesbloqueo(payload, datos, userId, msg.from);
 return void bot.sendMessage(chatId, t(lang, "verify_success", contenido), { parse_mode: "Markdown" });
 } catch (error) {
 console.error("Error en deep link:", error);
@@ -366,7 +462,7 @@ if (texto === "/generar_clave") {
 if (userId !== MI_ID_ADMIN) return void bot.sendMessage(chatId, t(lang, "unauthorized"));
 const nuevaClave = "VIP-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 try {
-await db.collection("claves").doc(nuevaClave).set({ usada: false, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
+await db.collection("claves").doc(nuevaClave).set({ usada: false, dias: 30, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
 return void bot.sendMessage(chatId, t(lang, "key_generated", nuevaClave), { parse_mode: "Markdown" });
 } catch (error) {
 console.error(error);
@@ -382,10 +478,13 @@ const claveDoc = await claveRef.get();
 if (!claveDoc.exists) return void bot.sendMessage(chatId, t(lang, "key_not_found"));
 if (claveDoc.data()?.["usada"]) return void bot.sendMessage(chatId, t(lang, "key_used"));
 await claveRef.update({ usada: true, usadaPor: userId });
+const diasClave = claveDoc.data()?.["dias"] ?? 30;
+const venceClave = new Date();
+venceClave.setDate(venceClave.getDate() + diasClave);
 await db.collection("creadores").doc(userId.toString()).set({
 activo: false, pendiente: true,
 fechaIngreso: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
-fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(fechaVencimientoDefault()),
+fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(venceClave),
 });
 await notificarAdminPendiente(userId);
 return void bot.sendMessage(chatId, t(lang, "key_valid"), { parse_mode: "Markdown" });
@@ -435,6 +534,10 @@ const newLang = data === "set_lang_es" ? "es" : "en";
 await setLang(userId, newLang);
 await bot.editMessageText(t(newLang, "language_set") + "\n\n" + t(newLang, "start_welcome"), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
+reply_markup: { inline_keyboard: [
+[{ text: t(newLang, "trial_btn"), callback_data: "probar_24h" }],
+[{ text: t(newLang, "menu_support"), callback_data: "soporte" }],
+] },
 });
 return;
 }
@@ -445,6 +548,31 @@ await bot.editMessageText(t(lang, "cancel_ok"), { chat_id: chatId, message_id: m
 return;
 }
 
+if (data === "probar_24h") {
+try {
+const ref = db.collection("creadores").doc(userId.toString());
+const doc = await ref.get();
+if (doc.exists && doc.data()?.["pruebaUsada"]) {
+await bot.sendMessage(chatId, t(lang, "trial_used"));
+return;
+}
+const vence = new Date(Date.now() + 24 * 60 * 60 * 1000);
+await ref.set({
+activo: true, pendiente: false, prueba: true, pruebaUsada: true,
+fechaIngreso: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(vence),
+}, { merge: true });
+await bot.sendMessage(chatId, t(lang, "trial_ok"), { parse_mode: "Markdown" });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data === "soporte") {
+estadosSoporte[chatId] = true;
+await bot.sendMessage(chatId, t(lang, "support_ask"), { parse_mode: "Markdown" });
+return;
+}
+
 if (data === "menu_main") {
 await bot.editMessageText(t(lang, "menu_title"), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
@@ -452,6 +580,8 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "menu_status"), callback_data: "menu_status" }],
 [{ text: t(lang, "menu_links"), callback_data: "menu_enlaces_0" }],
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
+[{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
+[{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ]},
 });
 return;
@@ -499,26 +629,67 @@ if (!estadosCreacion[chatId] || estadosCreacion[chatId].paso !== 2) return;
 const contenido = msg.text ?? "";
 if (!contenido) return;
 bot.removeListener("message", onceHandler);
-const canalesGuardados = [...estadosCreacion[chatId].canales];
-const hLang = estadosCreacion[chatId].lang ?? lang;
-delete estadosCreacion[chatId];
-const idUnico = "prod_" + Date.now();
-try {
-await db.collection("enlaces").doc(idUnico).set({
-canales: canalesGuardados, canal: canalesGuardados[0], contenido,
-creador: userId, visitas: 0, desbloqueos: 0,
-fecha: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+estadosCreacion[chatId].contenido = contenido;
+estadosCreacion[chatId].paso = 3;
+const lLang = estadosCreacion[chatId].lang ?? lang;
+await bot.sendMessage(chatId, t(lLang, "limit_ask"), {
+parse_mode: "Markdown",
+reply_markup: { inline_keyboard: [
+[{ text: t(lLang, "limit_none"), callback_data: "limite_none" }],
+[{ text: t(lLang, "limit_exp_1d"), callback_data: "limite_exp_1" }, { text: t(lLang, "limit_exp_7d"), callback_data: "limite_exp_7" }, { text: t(lLang, "limit_exp_30d"), callback_data: "limite_exp_30" }],
+[{ text: t(lLang, "limit_uses_10"), callback_data: "limite_uses_10" }, { text: t(lLang, "limit_uses_50"), callback_data: "limite_uses_50" }, { text: t(lLang, "limit_uses_100"), callback_data: "limite_uses_100" }],
+[{ text: t(lLang, "cancel_process"), callback_data: "cancelar_creacion" }],
+] },
 });
-const infoBot = await bot.getMe();
-const enlace = `https://t.me/${infoBot.username}?start=${idUnico}`;
-const listaStr = canalesGuardados.map((c, i) => `   ${i + 1}. ${c}`).join("\n");
-await bot.sendMessage(chatId, t(hLang, "create_success", enlace, listaStr), { parse_mode: "Markdown" });
-} catch (error) {
-console.error(error);
-await bot.sendMessage(chatId, t(hLang, "create_error"));
-}
 };
 bot.on("message", onceHandler);
+return;
+}
+
+if (data.startsWith("limite_")) {
+const estado = estadosCreacion[chatId];
+if (!estado || estado.paso !== 3 || !estado.contenido) return;
+delete estadosCreacion[chatId];
+let limite = null;
+if (data.startsWith("limite_exp_")) limite = { tipo: "exp", dias: parseInt(data.replace("limite_exp_", "")) || 30 };
+else if (data.startsWith("limite_uses_")) limite = { tipo: "uses", usos: parseInt(data.replace("limite_uses_", "")) || 0 };
+try { await bot.deleteMessage(chatId, messageId); } catch (e) {}
+await guardarEnlace(chatId, userId, estado, limite);
+return;
+}
+
+if (data === "menu_stats") {
+try {
+const rawSnap = await db.collection("enlaces").where("creador", "==", userId).get();
+const docs = rawSnap.docs.slice().sort((a, b) => (b.data()["desbloqueos"] ?? 0) - (a.data()["desbloqueos"] ?? 0));
+if (docs.length === 0) {
+await bot.editMessageText(t(lang, "stats_no_links"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "menu_main" }]] } });
+return;
+}
+const lineas = [t(lang, "stats_top_title")];
+docs.slice(0, 5).forEach((d, i) => lineas.push(t(lang, "stats_row", i + 1, d.id, d.data()["desbloqueos"] ?? 0)));
+await bot.editMessageText(lineas.join("\n"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "menu_main" }]] } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data.startsWith("stats_")) {
+const id = data.replace("stats_", "");
+try {
+const doc = await db.collection("enlaces").doc(id).get();
+if (!doc.exists || doc.data()?.["creador"] !== userId) return;
+const total = doc.data()["desbloqueos"] ?? 0;
+const snap = await db.collection("desbloqueos").where("enlaceId", "==", id).get();
+const regs = snap.docs.slice().sort((a, b) => (b.data()["fecha"]?.seconds ?? 0) - (a.data()["fecha"]?.seconds ?? 0)).slice(0, 10);
+const lineas = [t(lang, "stats_link_title", id, total)];
+if (regs.length === 0) lineas.push(t(lang, "stats_empty"));
+regs.forEach((d) => {
+const r = d.data();
+const fecha = r["fecha"] ? r["fecha"].toDate().toLocaleDateString(lang === "en" ? "en-US" : "es-ES") : "";
+lineas.push(t(lang, "stats_unlock_row", r["nombre"] ?? "", fecha));
+});
+await bot.editMessageText(lineas.join("\n"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "menu_enlaces_0" }]] } });
+} catch (error) { console.error(error); }
 return;
 }
 
@@ -560,11 +731,15 @@ try {
 const snap = await db.collection("enlaces").doc(payload).get();
 if (!snap.exists) return;
 const datos = snap.data();
+const bloqueo = enlaceBloqueado(datos);
+if (bloqueo === "expired") { void bot.answerCallbackQuery(query.id, { text: t(lang, "link_expired"), show_alert: true }); return; }
+if (bloqueo === "limit") { void bot.answerCallbackQuery(query.id, { text: t(lang, "link_limit"), show_alert: true }); return; }
 const { aprobado, faltante } = await verificarTodosLosCanales(obtenerCanales(datos), userId);
 if (!aprobado) {
 void bot.answerCallbackQuery(query.id, { text: t(lang, "verify_fail", faltante ?? ""), show_alert: true });
 } else {
 await db.collection("enlaces").doc(payload).update({ desbloqueos: firebaseAdmin.firestore.FieldValue.increment(1) });
+await registrarDesbloqueo(payload, datos, userId, query.from);
 void bot.editMessageText(t(lang, "verify_success", datos["contenido"]), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" });
 }
 } catch (error) {
@@ -606,10 +781,23 @@ if (data.startsWith("panel_creadores_")) { await mostrarListaCreadores(chatId, m
 if (data.startsWith("panel_creator_")) { await mostrarCreadorAdmin(chatId, messageId, data.replace("panel_creator_", "")); return; }
 
 if (data === "panel_generar_clave") {
+await bot.editMessageText(t(lang, "key_choose_days"), {
+chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
+reply_markup: { inline_keyboard: [
+[{ text: "1 día", callback_data: "gen_clave_1" }, { text: "7 días", callback_data: "gen_clave_7" }],
+[{ text: "15 días", callback_data: "gen_clave_15" }, { text: "30 días", callback_data: "gen_clave_30" }],
+[{ text: t(lang, "menu_back"), callback_data: "panel_main" }],
+] },
+});
+return;
+}
+
+if (data.startsWith("gen_clave_")) {
+const dias = parseInt(data.replace("gen_clave_", "")) || 30;
 const nuevaClave = "VIP-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 try {
-await db.collection("claves").doc(nuevaClave).set({ usada: false, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
-await bot.editMessageText(t(lang, "key_generated", nuevaClave), {
+await db.collection("claves").doc(nuevaClave).set({ usada: false, dias, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
+await bot.editMessageText(t(lang, "key_generated_days", nuevaClave, dias), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] },
 });
@@ -618,10 +806,11 @@ return;
 }
 
 if (data.startsWith("add_time_")) {
-const partes = data.split("*");
-const unidad = partes[partes.length - 1];
-const cantidad = parseInt(partes[partes.length - 2]);
-const uid = partes.slice(2, partes.length - 2).join("*");
+const m = data.match(/^add_time_(.+)_(-?\d+)_(hora|dia)$/);
+if (!m) return;
+const uid = m[1];
+const cantidad = parseInt(m[2]);
+const unidad = m[3];
 try {
 const ref = db.collection("creadores").doc(uid);
 const doc = await ref.get();
@@ -631,16 +820,18 @@ const base = venc && venc.toDate() > new Date() ? venc.toDate() : new Date();
 const nuevaFecha = new Date(base);
 if (unidad === "hora") nuevaFecha.setHours(nuevaFecha.getHours() + cantidad);
 else nuevaFecha.setDate(nuevaFecha.getDate() + cantidad);
-await ref.update({ activo: true, fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(nuevaFecha) });
+const sigueActivo = nuevaFecha > new Date();
+await ref.update({ activo: sigueActivo, avisoVencimiento: false, fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(nuevaFecha) });
 await mostrarCreadorAdmin(chatId, messageId, uid);
 } catch (error) { console.error(error); }
 return;
 }
 
 if (data.startsWith("toggle_creator_")) {
-const partes = data.split("*");
-const nuevoEstado = partes[partes.length - 1] === "true";
-const uid = partes.slice(2, partes.length - 1).join("*");
+const m = data.match(/^toggle_creator_(.+)_(true|false)$/);
+if (!m) return;
+const uid = m[1];
+const nuevoEstado = m[2] === "true";
 try {
 await db.collection("creadores").doc(uid).update({ activo: nuevoEstado });
 await mostrarCreadorAdmin(chatId, messageId, uid);
@@ -648,6 +839,40 @@ await mostrarCreadorAdmin(chatId, messageId, uid);
 return;
 }
 });
+
+async function trabajoPeriodico() {
+try {
+const ahora = new Date();
+const en24h = new Date(ahora.getTime() + 24 * 60 * 60 * 1000);
+const snap = await db.collection("creadores").where("activo", "==", true).get();
+for (const doc of snap.docs) {
+const data = doc.data();
+const venc = data["fechaVencimiento"];
+if (!venc) continue;
+const vence = venc.toDate();
+if (vence > ahora && vence <= en24h && !data["avisoVencimiento"]) {
+const horas = Math.max(1, Math.round((vence - ahora) / 3600000));
+const uid = parseInt(doc.id);
+try { await bot.sendMessage(uid, t(await getLang(uid), "vip_reminder", horas), { parse_mode: "Markdown" }); } catch (e) {}
+await doc.ref.update({ avisoVencimiento: true });
+}
+}
+const desSnap = await db.collection("desbloqueos").orderBy("fecha", "desc").limit(100).get();
+for (const d of desSnap.docs) {
+const r = d.data();
+const enlaceSnap = await db.collection("enlaces").doc(r["enlaceId"]).get();
+if (!enlaceSnap.exists) { await d.ref.delete(); continue; }
+const canales = obtenerCanales(enlaceSnap.data());
+const { aprobado } = await verificarTodosLosCanales(canales, r["userId"]);
+if (!aprobado) {
+await d.ref.delete();
+try { await bot.sendMessage(r["userId"], t(await getLang(r["userId"]), "access_lost"), { parse_mode: "Markdown" }); } catch (e) {}
+}
+}
+} catch (error) { console.error("Error en trabajo periódico:", error); }
+}
+setTimeout(trabajoPeriodico, 60 * 1000);
+setInterval(trabajoPeriodico, 6 * 60 * 60 * 1000);
 
 bot.on("polling_error", (error) => { console.error("Polling error:", error); });
 
