@@ -177,9 +177,10 @@ try {
 const doc = await db.collection("config").doc("global").get();
 if (!doc.exists) return [];
 const data = doc.data() ?? {};
-if (Array.isArray(data["canalesObligatorios"])) return data["canalesObligatorios"];
-if (data["canalNoticias"]) return [data["canalNoticias"]];
-return [];
+const lista = [];
+if (Array.isArray(data["canalesObligatorios"])) lista.push(...data["canalesObligatorios"]);
+if (data["canalNoticias"]) lista.push(data["canalNoticias"]);
+return [...new Set(lista.flatMap((c) => String(c).split(/[\s,]+/).filter(Boolean)))];
 } catch (error) { console.error(error); return []; }
 }
 
