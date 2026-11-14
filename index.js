@@ -27,6 +27,11 @@ const estadosCreacion = {};
 const estadosSoporte = {};
 const estadosCaptcha = {};
 const estadosCanal = {};
+const estadosClave = {};
+const estadosCupon = {};
+const estadosCuponUsuario = {};
+const estadosBienvenida = {};
+const clavesPasadas = new Map();
 const DIAS_POR_REFERIDO = 3;
 const MINUTOS_AUTOBORRADO = 5;
 const PLANES = {
@@ -40,6 +45,87 @@ async function logCanal(texto) {
 if (!LOG_CHANNEL_ID) return;
 try { await bot.sendMessage(LOG_CHANNEL_ID, texto); } catch (e) { console.error("Error al registrar en canal:", e.message); }
 }
+
+// ---- v5: cupones, claves de enlace, enlaces programados, bienvenida ----
+function parseStarsPayload(payload) {
+if (!payload || !payload.startsWith("stars_")) return null;
+const rest = payload.slice("stars_".length);
+const [planKey, codigo] = rest.split("|");
+return { planKey, codigo: codigo || null };
+}
+
+function precioPlan(planKey, desc) {
+const plan = PLANES[planKey];
+if (!plan) return 0;
+return Math.max(1, Math.round(plan.stars * (100 - (desc || 0)) / 100));
+}
+
+async function validarCupon(codigo) {
+const doc = await db.collection("cupones").doc(codigo).get();
+if (!doc.exists) return { ok: false, errorKey: "cupon_not_found" };
+const d = doc.data();
+if (!d["activo"]) return { ok: false, errorKey: "cupon_inactive" };
+if (d["expiraEl"] && d["expiraEl"].toDate() <= new Date()) return { ok: false, errorKey: "cupon_expired" };
+if (typeof d["usosMax"] === "number" && d["usosMax"] > 0 && (d["usos"] ?? 0) >= d["usosMax"]) return { ok: false, errorKey: "cupon_no_uses" };
+return { ok: true, cupon: d };
+}
+
+async function getCuponAplicado(userId) {
+try {
+const doc = await db.collection("usuarios").doc(userId.toString()).get();
+const aplicado = doc.exists ? doc.data()?.["cuponAplicado"] : null;
+if (!aplicado || !aplicado.codigo) return { cupon: null, invalido: false };
+const res = await validarCupon(aplicado.codigo);
+if (!res.ok) {
+await db.collection("usuarios").doc(userId.toString()).set({ cuponAplicado: firebaseAdmin.firestore.FieldValue.delete() }, { merge: true });
+return { cupon: null, invalido: true };
+}
+return { cupon: { codigo: aplicado.codigo, descuento: res.cupon.descuento }, invalido: false };
+} catch (e) { console.error("Error al leer cupón aplicado:", e); return { cupon: null, invalido: false }; }
+}
+
+function parseFechaMonterrey(texto) {
+const m = texto.trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})$/);
+if (!m) return null;
+const dia = parseInt(m[1]);
+const mes = parseInt(m[2]) - 1;
+const anio = parseInt(m[3]);
+const hora = parseInt(m[4]);
+const min = parseInt(m[5]);
+if (mes < 0 || mes > 11 || dia < 1 || dia > 31 || hora > 23 || min > 59) return null;
+const d = new Date(Date.UTC(anio, mes, dia, hora + 6, min));
+const local = new Date(d.getTime() - 6 * 60 * 60 * 1000);
+if (local.getUTCFullYear() !== anio || local.getUTCMonth() !== mes || local.getUTCDate() !== dia || local.getUTCHours() !== hora || local.getUTCMinutes() !== min) return null;
+return d;
+}
+
+function formatearFechaMonterrey(ts) {
+const ms = typeof ts === "number" ? ts : (ts?.toMillis ? ts.toMillis() : (ts?.seconds ? ts.seconds * 1000 : null));
+if (!ms) return "—";
+const d = new Date(ms - 6 * 60 * 60 * 1000);
+const p = (n) => String(n).padStart(2, "0");
+return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)}/${d.getUTCFullYear()} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+function escapeMarkdown(texto) {
+const barra = String.fromCharCode(92);
+return String(texto).split("").map((c) => "_*`[]()".includes(c) ? barra + c : c).join("");
+}
+
+async function getMensajeBienvenida(creadorId) {
+try {
+const doc = await db.collection("creadores").doc(String(creadorId)).get();
+return doc.exists ? (doc.data()?.["mensajeBienvenida"] ?? "") : "";
+} catch { return ""; }
+}
+
+function clavePasada(chatId, payload) {
+const e = clavesPasadas.get(`${chatId}:${payload}`);
+return !!e && Date.now() - e < 60 * 60 * 1000;
+}
+
+function marcarClavePasada(chatId, payload) { clavesPasadas.set(`${chatId}:${payload}`, Date.now()); }
+function limpiarClavePasada(chatId, payload) { clavesPasadas.delete(`${chatId}:${payload}`); }
 
 async function generarExcelBuffer() {
 const [uSnap, eSnap, dSnap, pgSnap] = await Promise.all([
@@ -98,6 +184,8 @@ canales: canalesGuardados, canal: canalesGuardados[0], contenido: estado.conteni
 creador: userId, visitas: 0, desbloqueos: 0,
 fecha: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
 };
+if (estado.clave) docData["clave"] = estado.clave;
+if (estado.programadoDesde) docData["programadoDesde"] = firebaseAdmin.firestore.Timestamp.fromMillis(estado.programadoDesde);
 let limiteTxt = t(hLang, "limit_none");
 if (limite && limite.tipo === "exp") {
 docData["expiraEl"] = firebaseAdmin.firestore.Timestamp.fromDate(new Date(Date.now() + limite.dias * 24 * 60 * 60 * 1000));
@@ -111,8 +199,11 @@ await db.collection("enlaces").doc(idUnico).set(docData);
 const infoBot = await bot.getMe();
 const enlace = `https://t.me/${infoBot.username}?start=${idUnico}`;
 const listaStr = canalesGuardados.map((c, i) => `   ${i + 1}. ${c}`).join("\n");
-await bot.sendMessage(chatId, t(hLang, "create_success", enlace, listaStr, limiteTxt), { parse_mode: "Markdown" });
-await logCanal(`🔗 Enlace creado: ${idUnico} por ID ${userId} — Canales: ${canalesGuardados.join(", ")}`);
+let extraTxt = "";
+if (estado.clave) extraTxt += "\n" + t(hLang, "create_success_clave");
+if (estado.programadoDesde) extraTxt += "\n" + t(hLang, "create_success_prog", formatearFechaMonterrey(estado.programadoDesde));
+await bot.sendMessage(chatId, t(hLang, "create_success", enlace, listaStr, limiteTxt) + extraTxt, { parse_mode: "Markdown" });
+await logCanal(`🔗 Enlace creado: ${idUnico} por ID ${userId} — Canales: ${canalesGuardados.join(", ")}${estado.clave ? " — 🔑 con clave" : ""}${estado.programadoDesde ? ` — 📅 desde ${formatearFechaMonterrey(estado.programadoDesde)}` : ""}`);
 } catch (error) {
 console.error(error);
 await bot.sendMessage(chatId, t(hLang, "create_error"));
@@ -281,6 +372,12 @@ const datos = snap.data();
 const bloqueo = enlaceBloqueado(datos);
 if (bloqueo === "expired") return void bot.sendMessage(chatId, t(lang, "link_expired"));
 if (bloqueo === "limit") return void bot.sendMessage(chatId, t(lang, "link_limit"));
+const prog = datos["programadoDesde"];
+if (prog && prog.toDate() > new Date()) return void bot.sendMessage(chatId, t(lang, "link_not_yet", formatearFechaMonterrey(prog)), { parse_mode: "Markdown" });
+if (datos["clave"] && !clavePasada(chatId, payload)) {
+estadosClave[chatId] = { payload, correcta: String(datos["clave"]) };
+return void bot.sendMessage(chatId, t(lang, "link_ask_password"), { parse_mode: "Markdown" });
+}
 const canales = obtenerCanales(datos);
 const contenido = datos["contenido"];
 await db.collection("enlaces").doc(payload).update({ visitas: firebaseAdmin.firestore.FieldValue.increment(1) });
@@ -288,12 +385,15 @@ const { aprobado, faltante } = await verificarTodosLosCanales(canales, userId);
 if (!aprobado && faltante) {
 const botonesCanales = canales.map((c) => [{ text: t(lang, "subscribe_btn", c), url: `https://t.me/${c.replace("@", "")}` }]);
 botonesCanales.push([{ text: t(lang, "verify_btn"), callback_data: `check_${payload}` }]);
-return void bot.sendMessage(chatId, canales.length > 1 ? t(lang, "content_locked_multi", canales.length) : t(lang, "content_locked_single"), {
+const bienvenida = await getMensajeBienvenida(datos["creador"]);
+const textoBloqueo = (bienvenida ? escapeMarkdown(bienvenida) + "\n\n" : "") + (canales.length > 1 ? t(lang, "content_locked_multi", canales.length) : t(lang, "content_locked_single"));
+return void bot.sendMessage(chatId, textoBloqueo, {
 parse_mode: "Markdown", reply_markup: { inline_keyboard: botonesCanales },
 });
 }
 await db.collection("enlaces").doc(payload).update({ desbloqueos: firebaseAdmin.firestore.FieldValue.increment(1) });
 await registrarDesbloqueo(payload, datos, userId, from);
+limpiarClavePasada(chatId, payload);
 const enviado = await bot.sendMessage(chatId, t(lang, "verify_success", contenido) + t(lang, "content_selfdestruct"), { parse_mode: "Markdown" });
 programarAutoborrado(chatId, enviado.message_id);
 return;
@@ -303,36 +403,56 @@ return void bot.sendMessage(chatId, t(lang, "error_generic"));
 }
 }
 
-async function mostrarPlanes(chatId, lang, messageId) {
+async function mostrarPlanes(chatId, userId, lang, messageId) {
+const { cupon } = await getCuponAplicado(userId);
+const desc = cupon ? cupon.descuento : 0;
+const texto = cupon ? t(lang, "planes_text_cupon", cupon.codigo, desc, precioPlan("basico", desc), precioPlan("pro", desc), precioPlan("ilimitado", desc)) : t(lang, "planes_text");
 const botones = [
-[{ text: t(lang, "plan_buy_basico"), callback_data: "buy_basico" }],
-[{ text: t(lang, "plan_buy_pro"), callback_data: "buy_pro" }],
-[{ text: t(lang, "plan_buy_ilimitado"), callback_data: "buy_ilimitado" }],
+[{ text: cupon ? t(lang, "plan_buy_basico_d", precioPlan("basico", desc)) : t(lang, "plan_buy_basico"), callback_data: "buy_basico" }],
+[{ text: cupon ? t(lang, "plan_buy_pro_d", precioPlan("pro", desc)) : t(lang, "plan_buy_pro"), callback_data: "buy_pro" }],
+[{ text: cupon ? t(lang, "plan_buy_ilimitado_d", precioPlan("ilimitado", desc)) : t(lang, "plan_buy_ilimitado"), callback_data: "buy_ilimitado" }],
+[{ text: t(lang, "planes_cupon_btn"), callback_data: "cupon_usar" }],
 ];
+if (cupon) botones.push([{ text: t(lang, "planes_cupon_quitar"), callback_data: "cupon_quitar" }]);
 if (messageId) botones.push([{ text: t(lang, "menu_back"), callback_data: "menu_main" }]);
 if (messageId) {
-await bot.editMessageText(t(lang, "planes_text"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: botones } });
+await bot.editMessageText(texto, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: botones } });
 return;
 }
-await bot.sendMessage(chatId, t(lang, "planes_text"), { parse_mode: "Markdown", reply_markup: { inline_keyboard: botones } });
+await bot.sendMessage(chatId, texto, { parse_mode: "Markdown", reply_markup: { inline_keyboard: botones } });
 }
 
-async function enviarFacturaPlan(chatId, planKey, lang) {
+async function enviarFacturaPlan(chatId, userId, planKey, lang, from) {
 const plan = PLANES[planKey];
 if (!plan) return;
-await bot.sendInvoice(chatId, t(lang, "plan_title", plan.nombre), t(lang, "plan_desc", plan.nombre, plan.dias), `stars_${planKey}`, "", "XTR", [{ label: t(lang, "plan_title", plan.nombre), amount: plan.stars }]);
+const { cupon, invalido } = await getCuponAplicado(userId);
+if (invalido) {
+await bot.sendMessage(chatId, t(lang, "cupon_invalid_now"), { parse_mode: "Markdown" });
+return void mostrarPlanes(chatId, userId, lang);
+}
+const desc = cupon ? cupon.descuento : 0;
+const precio = precioPlan(planKey, desc);
+if (desc >= 100) {
+await procesarPagoStars(chatId, userId, { invoice_payload: `stars_${planKey}|${cupon.codigo}`, telegram_payment_charge_id: `cupon_${cupon.codigo}`, total_amount: 0 }, lang, from);
+return;
+}
+const payload = cupon ? `stars_${planKey}|${cupon.codigo}` : `stars_${planKey}`;
+await bot.sendInvoice(chatId, t(lang, "plan_title", plan.nombre), t(lang, "plan_desc", plan.nombre, plan.dias), payload, "", "XTR", [{ label: t(lang, "plan_title", plan.nombre), amount: precio }]);
 }
 
 async function procesarPagoStars(chatId, userId, pago, lang, from) {
 try {
 const payload = pago?.invoice_payload ?? "";
-if (!payload.startsWith("stars_")) return;
-const planKey = payload.replace("stars_", "");
+const parsed = parseStarsPayload(payload);
+if (!parsed) return;
+const planKey = parsed.planKey;
+const codigoCupon = parsed.codigo;
 const plan = PLANES[planKey];
 if (!plan) return;
+const starsPagados = typeof pago?.total_amount === "number" ? pago.total_amount : plan.stars;
 const chargeId = pago?.telegram_payment_charge_id ?? "";
 if (chargeId) {
-const yaPagado = await db.collection("pagos").where("chargeId", "==", chargeId).limit(1).get();
+const yaPagado = await db.collection("pagos").where("chargeId", "==", chargeId).where("userId", "==", userId).limit(1).get();
 if (!yaPagado.empty) return;
 }
 const ref = db.collection("creadores").doc(userId.toString());
@@ -349,9 +469,16 @@ avisoVencimiento: false,
 if (!doc.exists) update.fechaIngreso = firebaseAdmin.firestore.FieldValue.serverTimestamp();
 await ref.set(update, { merge: true });
 await db.collection("pagos").add({
-userId, plan: planKey, stars: plan.stars, dias: plan.dias, chargeId,
+userId, plan: planKey, stars: starsPagados, dias: plan.dias, chargeId, cupon: codigoCupon ?? "",
 fecha: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
 });
+if (codigoCupon) {
+try {
+await db.collection("cupones").doc(codigoCupon).update({ usos: firebaseAdmin.firestore.FieldValue.increment(1) });
+await db.collection("usuarios").doc(userId.toString()).set({ cuponAplicado: firebaseAdmin.firestore.FieldValue.delete() }, { merge: true });
+await logCanal(`🎟️ Cupón usado: ${codigoCupon} por ${nombreUsuario(from)} (ID: ${userId}) — Plan ${plan.nombre} — ${starsPagados} ⭐`);
+} catch (e) { console.error("Error al registrar uso de cupón:", e); }
+}
 try {
 const uDoc = await db.collection("usuarios").doc(userId.toString()).get();
 const referidoPor = uDoc.exists ? uDoc.data()?.["referidoPor"] : null;
@@ -370,10 +497,10 @@ await logCanal(`🎉 Referido: ID ${userId} se hizo creador (pago con Stars) —
 }
 } catch (error) { console.error("Error al recompensar referido por pago:", error); }
 await bot.sendMessage(chatId, t(lang, "pago_ok", plan.nombre, plan.dias, formatearFecha(firebaseAdmin.firestore.Timestamp.fromDate(nuevaFecha), lang)), { parse_mode: "Markdown" });
-await logCanal(`💰 Pago con Stars: ${nombreUsuario(from)} (ID: ${userId}) — Plan ${plan.nombre} — ${plan.stars} ⭐ — ${plan.dias} días`);
+await logCanal(`💰 Pago con Stars: ${nombreUsuario(from)} (ID: ${userId}) — Plan ${plan.nombre} — ${starsPagados} ⭐ — ${plan.dias} días${codigoCupon ? ` — Cupón ${codigoCupon}` : ""}`);
 try {
 const aLang = await getLang(MI_ID_ADMIN);
-await bot.sendMessage(MI_ID_ADMIN, t(aLang, "pago_admin", nombreUsuario(from), userId, plan.nombre, plan.stars), { parse_mode: "Markdown" });
+await bot.sendMessage(MI_ID_ADMIN, t(aLang, "pago_admin", nombreUsuario(from), userId, plan.nombre, starsPagados), { parse_mode: "Markdown" });
 } catch (e) {}
 } catch (error) {
 console.error("Error al procesar pago con Stars:", error);
@@ -391,6 +518,7 @@ inline_keyboard: [
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
 [{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
 [{ text: t(lang, "menu_referidos"), callback_data: "menu_referidos" }],
+[{ text: t(lang, "menu_bienvenida"), callback_data: "menu_bienvenida" }],
 [{ text: t(lang, "planes_btn"), callback_data: "menu_planes" }],
 [{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ],
@@ -453,7 +581,10 @@ const canales = obtenerCanales(data);
 const visitas = data["visitas"] ?? 0;
 const desbloqueos = data["desbloqueos"] ?? 0;
 const fechaStr = data["fecha"] ? data["fecha"].toDate().toLocaleDateString(lang === "en" ? "en-US" : "es-ES") : "–";
-lineas.push(`/link\`${doc.id}\`\n   ${canales.join(" + ")}\n   ${fechaStr} | v:${visitas} d:${desbloqueos} (${tasaConversion(visitas, desbloqueos)})`); botones.push([{ text: "📊", callback_data: `stats_${doc.id}` }, { text: t(lang, "delete_btn", doc.id), callback_data: `del_confirm_${doc.id}` }]);
+const marcaClave = data["clave"] ? "🔑 " : "";
+let lineaEnlace = `${marcaClave}/link\`${doc.id}\`\n   ${canales.join(" + ")}\n   ${fechaStr} | v:${visitas} d:${desbloqueos} (${tasaConversion(visitas, desbloqueos)})`;
+if (data["programadoDesde"]) lineaEnlace += `\n   ${t(lang, "stats_active_from", formatearFechaMonterrey(data["programadoDesde"]))}`;
+lineas.push(lineaEnlace); botones.push([{ text: "📊", callback_data: `stats_${doc.id}` }, { text: t(lang, "delete_btn", doc.id), callback_data: `del_confirm_${doc.id}` }]);
 }
 
 const navRow = [];
@@ -478,6 +609,7 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "panel_pending_btn", snap.size), callback_data: "panel_pendientes_0" }],
 [{ text: t(lang, "panel_creators_btn"), callback_data: "panel_creadores_0" }],
 [{ text: t(lang, "panel_gen_key_btn"), callback_data: "panel_generar_clave" }],
+[{ text: t(lang, "panel_cupones_btn"), callback_data: "panel_cupones" }],
 [{ text: t(lang, "panel_stats_btn"), callback_data: "panel_stats" }],
 [{ text: t(lang, "panel_export_btn"), callback_data: "panel_export" }],
 [{ text: t(lang, "panel_backup_btn"), callback_data: "panel_respaldo" }],
@@ -734,7 +866,7 @@ return void mostrarMenuCreador(chatId, lang);
 
 if (texto === "/planes") {
 if (!await exigeCanalGlobal(chatId, userId, lang)) return;
-return void mostrarPlanes(chatId, lang);
+return void mostrarPlanes(chatId, userId, lang);
 }
 
 if (texto === "/generar_clave") {
@@ -783,6 +915,109 @@ if (estadosCreacion[chatId]) { delete estadosCreacion[chatId]; return void bot.s
 return void bot.sendMessage(chatId, t(lang, "cancel_none"));
 }
 
+if (estadosClave[chatId] && texto && !texto.startsWith("/")) {
+const estadoClave = estadosClave[chatId];
+if (texto.trim() === estadoClave.correcta) {
+delete estadosClave[chatId];
+marcarClavePasada(chatId, estadoClave.payload);
+await bot.sendMessage(chatId, t(lang, "link_password_ok"));
+await procesarDeepLink(chatId, userId, estadoClave.payload, lang, msg.from);
+} else {
+await bot.sendMessage(chatId, t(lang, "link_password_wrong"));
+}
+return;
+}
+
+if (userId === MI_ID_ADMIN && estadosCupon[chatId] && texto && !texto.startsWith("/")) {
+const est = estadosCupon[chatId];
+if (est.paso === "codigo") {
+const codigo = texto.trim().toUpperCase();
+if (!/^[A-Z0-9_-]{3,20}$/.test(codigo)) { await bot.sendMessage(chatId, t(lang, "cupon_code_invalid")); return; }
+const existe = await db.collection("cupones").doc(codigo).get();
+if (existe.exists) { await bot.sendMessage(chatId, t(lang, "cupon_code_exists", codigo), { parse_mode: "Markdown" }); return; }
+est.codigo = codigo;
+est.paso = "descuento";
+await bot.sendMessage(chatId, t(lang, "cupon_ask_discount"), { parse_mode: "Markdown" });
+return;
+}
+if (est.paso === "descuento") {
+const n = parseInt(texto.trim(), 10);
+if (isNaN(n) || n < 10 || n > 100) { await bot.sendMessage(chatId, t(lang, "cupon_discount_invalid")); return; }
+est.descuento = n;
+est.paso = "usos";
+await bot.sendMessage(chatId, t(lang, "cupon_ask_uses"), { parse_mode: "Markdown" });
+return;
+}
+if (est.paso === "usos") {
+const n = parseInt(texto.trim(), 10);
+if (isNaN(n) || n < 0) { await bot.sendMessage(chatId, t(lang, "cupon_uses_invalid")); return; }
+est.usosMax = n;
+est.paso = "dias";
+await bot.sendMessage(chatId, t(lang, "cupon_ask_days"), { parse_mode: "Markdown" });
+return;
+}
+if (est.paso === "dias") {
+const n = parseInt(texto.trim(), 10);
+if (isNaN(n) || n < 0) { await bot.sendMessage(chatId, t(lang, "cupon_days_invalid")); return; }
+delete estadosCupon[chatId];
+try {
+const expira = n > 0 ? firebaseAdmin.firestore.Timestamp.fromDate(new Date(Date.now() + n * 24 * 60 * 60 * 1000)) : null;
+await db.collection("cupones").doc(est.codigo).set({ codigo: est.codigo, descuento: est.descuento, usosMax: est.usosMax, usos: 0, expiraEl: expira, activo: true, creadoPor: userId, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
+const vencTxt = expira ? formatearFecha(expira, lang) : t(lang, "limit_none");
+const usosTxt = est.usosMax === 0 ? t(lang, "limit_none") : String(est.usosMax);
+await bot.sendMessage(chatId, t(lang, "cupon_created", est.codigo, est.descuento, usosTxt, vencTxt), { parse_mode: "Markdown" });
+await logCanal(`🎟️ Cupón creado: ${est.codigo} — ${est.descuento}% — máx. ${usosTxt} usos — vence: ${vencTxt}`);
+} catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "error_generic")); }
+return;
+}
+}
+
+if (estadosCuponUsuario[chatId] && texto && !texto.startsWith("/")) {
+delete estadosCuponUsuario[chatId];
+const codigo = texto.trim().toUpperCase();
+try {
+const res = await validarCupon(codigo);
+if (!res.ok) { await bot.sendMessage(chatId, t(lang, res.errorKey)); return; }
+await db.collection("usuarios").doc(userId.toString()).set({ cuponAplicado: { codigo, descuento: res.cupon.descuento } }, { merge: true });
+await bot.sendMessage(chatId, t(lang, "cupon_applied", codigo, res.cupon.descuento), { parse_mode: "Markdown" });
+await mostrarPlanes(chatId, userId, lang);
+} catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "error_generic")); }
+return;
+}
+
+if (estadosBienvenida[chatId] && texto && !texto.startsWith("/")) {
+if (texto.length > 500) { await bot.sendMessage(chatId, t(lang, "bienvenida_too_long")); return; }
+delete estadosBienvenida[chatId];
+try {
+await db.collection("creadores").doc(userId.toString()).set({ mensajeBienvenida: texto }, { merge: true });
+await bot.sendMessage(chatId, t(lang, "bienvenida_saved"), { parse_mode: "Markdown" });
+} catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "error_generic")); }
+return;
+}
+
+if (estadosCreacion[chatId] && estadosCreacion[chatId].paso === 4 && texto && !texto.startsWith("/")) {
+const estado = estadosCreacion[chatId];
+const clave = texto.trim();
+if (clave.length < 1 || clave.length > 64) { await bot.sendMessage(chatId, t(estado.lang ?? lang, "create_password_invalid")); return; }
+estado.clave = clave;
+estado.paso = 5;
+await bot.sendMessage(chatId, t(estado.lang ?? lang, "create_schedule_ask"), { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+[{ text: t(estado.lang ?? lang, "create_schedule_now"), callback_data: "prog_ahora" }, { text: t(estado.lang ?? lang, "create_schedule_date"), callback_data: "prog_fecha" }],
+[{ text: t(estado.lang ?? lang, "cancel_process"), callback_data: "cancelar_creacion" }],
+] } });
+return;
+}
+
+if (estadosCreacion[chatId] && estadosCreacion[chatId].paso === 5 && estadosCreacion[chatId].esperandoFecha && texto && !texto.startsWith("/")) {
+const estado = estadosCreacion[chatId];
+const fecha = parseFechaMonterrey(texto);
+if (!fecha || fecha.getTime() <= Date.now()) { await bot.sendMessage(chatId, t(estado.lang ?? lang, "create_schedule_invalid"), { parse_mode: "Markdown" }); return; }
+estado.programadoDesde = fecha.getTime();
+delete estadosCreacion[chatId];
+await guardarEnlace(chatId, userId, estado, estado.limite ?? null);
+return;
+}
+
 if (estadosCreacion[chatId] && estadosCreacion[chatId].paso === 1) {
 const estado = estadosCreacion[chatId];
 const eLang = estado.lang;
@@ -807,8 +1042,8 @@ reply_markup: { inline_keyboard: [
 bot.on("pre_checkout_query", async (query) => {
 try {
 const payload = query.invoice_payload ?? "";
-const planKey = payload.replace("stars_", "");
-if (!payload.startsWith("stars_") || !PLANES[planKey]) {
+const parsed = parseStarsPayload(payload);
+if (!parsed || !PLANES[parsed.planKey]) {
 return void bot.answerPreCheckoutQuery(query.id, false, { error_message: "Plan no válido." });
 }
 await bot.answerPreCheckoutQuery(query.id, true);
@@ -882,12 +1117,12 @@ return;
 }
 
 if (data === "planes_ver") {
-await mostrarPlanes(chatId, lang);
+await mostrarPlanes(chatId, userId, lang);
 return;
 }
 
 if (data === "menu_planes") {
-await mostrarPlanes(chatId, lang, messageId);
+await mostrarPlanes(chatId, userId, lang, messageId);
 return;
 }
 
@@ -896,11 +1131,26 @@ const planKey = data.replace("buy_", "");
 if (!PLANES[planKey]) return;
 if (!await exigeCanalGlobal(chatId, userId, lang)) return;
 try {
-await enviarFacturaPlan(chatId, planKey, lang);
+await enviarFacturaPlan(chatId, userId, planKey, lang, query.from);
 } catch (error) {
 console.error("Error al enviar factura:", error);
 await bot.sendMessage(chatId, t(lang, "error_generic"));
 }
+return;
+}
+
+if (data === "cupon_usar") {
+estadosCuponUsuario[chatId] = { paso: "codigo" };
+await bot.sendMessage(chatId, t(lang, "cupon_ask_code_user"), { parse_mode: "Markdown" });
+return;
+}
+
+if (data === "cupon_quitar") {
+try {
+await db.collection("usuarios").doc(userId.toString()).set({ cuponAplicado: firebaseAdmin.firestore.FieldValue.delete() }, { merge: true });
+await bot.sendMessage(chatId, t(lang, "cupon_removed"), { parse_mode: "Markdown" });
+await mostrarPlanes(chatId, userId, lang, messageId);
+} catch (error) { console.error(error); }
 return;
 }
 
@@ -956,6 +1206,34 @@ await bot.editMessageText(t(lang, "ref_title", link, count, dias), { chat_id: ch
 return;
 }
 
+if (data === "menu_bienvenida") {
+try {
+const doc = await db.collection("creadores").doc(userId.toString()).get();
+const actual = doc.exists ? (doc.data()?.["mensajeBienvenida"] ?? "") : "";
+const texto = t(lang, "bienvenida_view", actual ? escapeMarkdown(actual) : t(lang, "bienvenida_empty"));
+await bot.editMessageText(texto, { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+[{ text: t(lang, "bienvenida_change_btn"), callback_data: "menu_bienvenida_cambiar" }],
+[{ text: t(lang, "bienvenida_remove_btn"), callback_data: "menu_bienvenida_quitar" }],
+[{ text: t(lang, "menu_back"), callback_data: "menu_main" }],
+] } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data === "menu_bienvenida_cambiar") {
+estadosBienvenida[chatId] = true;
+await bot.sendMessage(chatId, t(lang, "bienvenida_ask"), { parse_mode: "Markdown" });
+return;
+}
+
+if (data === "menu_bienvenida_quitar") {
+try {
+await db.collection("creadores").doc(userId.toString()).set({ mensajeBienvenida: firebaseAdmin.firestore.FieldValue.delete() }, { merge: true });
+await bot.editMessageText(t(lang, "bienvenida_removed"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "menu_main" }]] } });
+} catch (error) { console.error(error); }
+return;
+}
+
 if (data === "menu_main") {
 await bot.editMessageText(t(lang, "menu_title"), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
@@ -965,6 +1243,7 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
 [{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
 [{ text: t(lang, "menu_referidos"), callback_data: "menu_referidos" }],
+[{ text: t(lang, "menu_bienvenida"), callback_data: "menu_bienvenida" }],
 [{ text: t(lang, "planes_btn"), callback_data: "menu_planes" }],
 [{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ]},
@@ -1043,12 +1322,51 @@ return;
 if (data.startsWith("limite_")) {
 const estado = estadosCreacion[chatId];
 if (!estado || estado.paso !== 3 || !estado.contenido) return;
-delete estadosCreacion[chatId];
 let limite = null;
 if (data.startsWith("limite_exp_")) limite = { tipo: "exp", dias: parseInt(data.replace("limite_exp_", "")) || 30 };
 else if (data.startsWith("limite_uses_")) limite = { tipo: "uses", usos: parseInt(data.replace("limite_uses_", "")) || 0 };
+estado.limite = limite;
+estado.paso = 4;
 try { await bot.deleteMessage(chatId, messageId); } catch (e) {}
-await guardarEnlace(chatId, userId, estado, limite);
+await bot.sendMessage(chatId, t(estado.lang ?? lang, "create_password_ask"), { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+[{ text: t(estado.lang ?? lang, "create_password_no"), callback_data: "clave_no" }, { text: t(estado.lang ?? lang, "create_password_yes"), callback_data: "clave_si" }],
+[{ text: t(estado.lang ?? lang, "cancel_process"), callback_data: "cancelar_creacion" }],
+] } });
+return;
+}
+
+if (data === "clave_no") {
+const estado = estadosCreacion[chatId];
+if (!estado || estado.paso !== 4) return;
+estado.paso = 5;
+await bot.sendMessage(chatId, t(estado.lang ?? lang, "create_schedule_ask"), { parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+[{ text: t(estado.lang ?? lang, "create_schedule_now"), callback_data: "prog_ahora" }, { text: t(estado.lang ?? lang, "create_schedule_date"), callback_data: "prog_fecha" }],
+[{ text: t(estado.lang ?? lang, "cancel_process"), callback_data: "cancelar_creacion" }],
+] } });
+return;
+}
+
+if (data === "clave_si") {
+const estado = estadosCreacion[chatId];
+if (!estado || estado.paso !== 4) return;
+await bot.sendMessage(chatId, t(estado.lang ?? lang, "create_password_type"), { parse_mode: "Markdown" });
+return;
+}
+
+if (data === "prog_ahora") {
+const estado = estadosCreacion[chatId];
+if (!estado || estado.paso !== 5) return;
+delete estadosCreacion[chatId];
+try { await bot.deleteMessage(chatId, messageId); } catch (e) {}
+await guardarEnlace(chatId, userId, estado, estado.limite ?? null);
+return;
+}
+
+if (data === "prog_fecha") {
+const estado = estadosCreacion[chatId];
+if (!estado || estado.paso !== 5) return;
+estado.esperandoFecha = true;
+await bot.sendMessage(chatId, t(estado.lang ?? lang, "create_schedule_type"), { parse_mode: "Markdown" });
 return;
 }
 
@@ -1076,6 +1394,8 @@ const total = doc.data()["desbloqueos"] ?? 0;
 const snap = await db.collection("desbloqueos").where("enlaceId", "==", id).get();
 const regs = snap.docs.slice().sort((a, b) => (b.data()["fecha"]?.seconds ?? 0) - (a.data()["fecha"]?.seconds ?? 0)).slice(0, 10);
 const lineas = [t(lang, "stats_link_title", id, total)];
+if (doc.data()["clave"]) lineas.push(t(lang, "stats_has_password"));
+if (doc.data()["programadoDesde"]) lineas.push(t(lang, "stats_active_from", formatearFechaMonterrey(doc.data()["programadoDesde"])));
 if (regs.length === 0) lineas.push(t(lang, "stats_empty"));
 regs.forEach((d) => {
 const r = d.data();
@@ -1128,12 +1448,20 @@ const datos = snap.data();
 const bloqueo = enlaceBloqueado(datos);
 if (bloqueo === "expired") { void bot.answerCallbackQuery(query.id, { text: t(lang, "link_expired"), show_alert: true }); return; }
 if (bloqueo === "limit") { void bot.answerCallbackQuery(query.id, { text: t(lang, "link_limit"), show_alert: true }); return; }
+const progCheck = datos["programadoDesde"];
+if (progCheck && progCheck.toDate() > new Date()) { void bot.answerCallbackQuery(query.id, { text: t(lang, "link_not_yet", formatearFechaMonterrey(progCheck)), show_alert: true }); return; }
+if (datos["clave"] && !clavePasada(chatId, payload)) {
+estadosClave[chatId] = { payload, correcta: String(datos["clave"]) };
+await bot.sendMessage(chatId, t(lang, "link_ask_password"), { parse_mode: "Markdown" });
+return;
+}
 const { aprobado, faltante } = await verificarTodosLosCanales(obtenerCanales(datos), userId);
 if (!aprobado) {
 void bot.answerCallbackQuery(query.id, { text: t(lang, "verify_fail", faltante ?? ""), show_alert: true });
 } else {
 await db.collection("enlaces").doc(payload).update({ desbloqueos: firebaseAdmin.firestore.FieldValue.increment(1) });
 await registrarDesbloqueo(payload, datos, userId, query.from);
+limpiarClavePasada(chatId, payload);
 void bot.editMessageText(t(lang, "verify_success", datos["contenido"]) + t(lang, "content_selfdestruct"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" });
 programarAutoborrado(chatId, messageId);
 }
@@ -1252,6 +1580,96 @@ try {
 const canales = await getCanalesObligatorios();
 await bot.editMessageText((canales.length ? t(lang, "canal_current", canales.join("\n")) + "\n\n" : "") + t(lang, "canal_ask"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
 estadosCanal[chatId] = true;
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data === "panel_cupones") {
+await bot.editMessageText(t(lang, "cupones_title"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+[{ text: t(lang, "cupon_create_btn"), callback_data: "panel_cupon_crear" }],
+[{ text: t(lang, "cupon_list_btn"), callback_data: "panel_cupones_ver" }],
+[{ text: t(lang, "menu_back"), callback_data: "panel_main" }],
+] } });
+return;
+}
+
+if (data === "panel_cupon_crear") {
+estadosCupon[chatId] = { paso: "codigo" };
+await bot.sendMessage(chatId, t(lang, "cupon_ask_code"), { parse_mode: "Markdown" });
+return;
+}
+
+if (data === "panel_cupones_ver") {
+try {
+const snap = await db.collection("cupones").limit(50).get();
+const docs = snap.docs.slice().sort((a, b) => (b.data()["fechaCreacion"]?.seconds ?? 0) - (a.data()["fechaCreacion"]?.seconds ?? 0));
+if (docs.length === 0) {
+await bot.editMessageText(t(lang, "cupones_none"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_cupones" }]] } });
+return;
+}
+const lineas = [t(lang, "cupones_list_title")];
+const botones = [];
+docs.forEach((d) => {
+const c = d.data();
+const venc = c["expiraEl"] ? formatearFecha(c["expiraEl"], lang) : t(lang, "limit_none");
+const estado = !c["activo"] ? t(lang, "cupon_state_inactive") : (c["expiraEl"] && c["expiraEl"].toDate() <= new Date() ? t(lang, "cupon_state_expired") : t(lang, "cupon_state_active"));
+const usosMaxTxt = c["usosMax"] === 0 ? "∞" : String(c["usosMax"] ?? 0);
+lineas.push(t(lang, "cupon_row", d.id, c["descuento"] ?? 0, c["usos"] ?? 0, usosMaxTxt, venc, estado));
+botones.push([{ text: `🎟️ ${d.id}`, callback_data: `cupon_gestion_${d.id}` }]);
+});
+botones.push([{ text: t(lang, "menu_back"), callback_data: "panel_cupones" }]);
+await bot.editMessageText(lineas.join("\n"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: botones } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data.startsWith("cupon_gestion_")) {
+const codigo = data.replace("cupon_gestion_", "");
+try {
+const doc = await db.collection("cupones").doc(codigo).get();
+if (!doc.exists) return;
+const c = doc.data();
+const venc = c["expiraEl"] ? formatearFecha(c["expiraEl"], lang) : t(lang, "limit_none");
+const estado = !c["activo"] ? t(lang, "cupon_state_inactive") : (c["expiraEl"] && c["expiraEl"].toDate() <= new Date() ? t(lang, "cupon_state_expired") : t(lang, "cupon_state_active"));
+const usosMaxTxt = c["usosMax"] === 0 ? "∞" : String(c["usosMax"] ?? 0);
+await bot.editMessageText(t(lang, "cupon_detail", codigo, c["descuento"] ?? 0, c["usos"] ?? 0, usosMaxTxt, venc, estado), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+[{ text: c["activo"] ? t(lang, "cupon_deactivate_btn") : t(lang, "cupon_activate_btn"), callback_data: `cupon_toggle_${codigo}` }],
+[{ text: t(lang, "cupon_delete_btn"), callback_data: `cupon_del_confirm_${codigo}` }],
+[{ text: t(lang, "menu_back"), callback_data: "panel_cupones_ver" }],
+] } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data.startsWith("cupon_toggle_")) {
+const codigo = data.replace("cupon_toggle_", "");
+try {
+const ref = db.collection("cupones").doc(codigo);
+const doc = await ref.get();
+if (!doc.exists) return;
+const nuevo = !(doc.data()?.["activo"] ?? true);
+await ref.update({ activo: nuevo });
+await logCanal(`🎟️ Cupón ${nuevo ? "activado" : "desactivado"}: ${codigo}`);
+await bot.editMessageText(t(lang, "cupon_toggled", codigo, nuevo ? t(lang, "cupon_state_active") : t(lang, "cupon_state_inactive")), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_cupones_ver" }]] } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data.startsWith("cupon_del_confirm_")) {
+const codigo = data.replace("cupon_del_confirm_", "");
+await bot.editMessageText(t(lang, "cupon_delete_confirm", codigo), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[
+{ text: t(lang, "delete_yes"), callback_data: `cupon_del_ok_${codigo}` },
+{ text: t(lang, "delete_cancel"), callback_data: `cupon_gestion_${codigo}` },
+]] } });
+return;
+}
+
+if (data.startsWith("cupon_del_ok_")) {
+const codigo = data.replace("cupon_del_ok_", "");
+try {
+await db.collection("cupones").doc(codigo).delete();
+await logCanal(`🎟️ Cupón eliminado: ${codigo}`);
+await bot.editMessageText(t(lang, "cupon_deleted", codigo), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_cupones_ver" }]] } });
 } catch (error) { console.error(error); }
 return;
 }
