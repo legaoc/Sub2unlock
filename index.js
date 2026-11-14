@@ -34,6 +34,32 @@ basico: { dias: 7, stars: 100, maxEnlaces: 3, nombre: "Básico" },
 pro: { dias: 15, stars: 200, maxEnlaces: 10, nombre: "Pro" },
 ilimitado: { dias: 30, stars: 300, maxEnlaces: 0, nombre: "Ilimitado" },
 };
+const LOG_CHANNEL_ID = process.env["LOG_CHANNEL_ID"] ?? "-1003781188313";
+
+async function logCanal(texto) {
+if (!LOG_CHANNEL_ID) return;
+try { await bot.sendMessage(LOG_CHANNEL_ID, texto); } catch (e) { console.error("Error al registrar en canal:", e.message); }
+}
+
+async function generarExcelBuffer() {
+const [uSnap, eSnap, dSnap, pgSnap] = await Promise.all([
+db.collection("usuarios").limit(1000).get(),
+db.collection("enlaces").limit(1000).get(),
+db.collection("desbloqueos").limit(1000).get(),
+db.collection("pagos").limit(1000).get(),
+]);
+const fmt = (ts) => ts?.toDate ? ts.toDate().toISOString() : "";
+const usuarios = uSnap.docs.map((d) => ({ id: d.id, idioma: d.data()["lang"] ?? "", referidoPor: d.data()["referidoPor"] ?? "" }));
+const enlaces = eSnap.docs.map((d) => ({ id: d.id, creador: d.data()["creador"] ?? "", canales: (d.data()["canales"] ?? []).join(", "), visitas: d.data()["visitas"] ?? 0, desbloqueos: d.data()["desbloqueos"] ?? 0, expiraEl: fmt(d.data()["expiraEl"]), limiteUsos: d.data()["limiteUsos"] ?? "", fecha: fmt(d.data()["fecha"]) }));
+const desbloqueos = dSnap.docs.map((d) => ({ enlaceId: d.data()["enlaceId"] ?? "", creador: d.data()["creador"] ?? "", userId: d.data()["userId"] ?? "", nombre: d.data()["nombre"] ?? "", fecha: fmt(d.data()["fecha"]) }));
+const pagos = pgSnap.docs.map((d) => ({ id: d.id, userId: d.data()["userId"] ?? "", plan: d.data()["plan"] ?? "", stars: d.data()["stars"] ?? 0, dias: d.data()["dias"] ?? 0, chargeId: d.data()["chargeId"] ?? "", fecha: fmt(d.data()["fecha"]) }));
+const wb = XLSX.utils.book_new();
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(usuarios), "Usuarios");
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(enlaces), "Enlaces");
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(desbloqueos), "Desbloqueos");
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pagos), "Pagos");
+return XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+}
 
 function nombreUsuario(from) {
 return from?.username ? `@${from.username}` : (from?.first_name ?? "usuario");
@@ -50,6 +76,7 @@ const total = (datos["desbloqueos"] ?? 0) + 1;
 try {
 await bot.sendMessage(datos["creador"], t(await getLang(datos["creador"]), "unlock_notify", nombre, enlaceId, total), { parse_mode: "Markdown" });
 } catch (e) {}
+await logCanal(`🔓 Desbloqueo: enlace ${enlaceId} por ${nombre} (ID: ${userId}) — total ${total}`);
 } catch (error) { console.error("Error al registrar desbloqueo:", error); }
 }
 
@@ -85,6 +112,7 @@ const infoBot = await bot.getMe();
 const enlace = `https://t.me/${infoBot.username}?start=${idUnico}`;
 const listaStr = canalesGuardados.map((c, i) => `   ${i + 1}. ${c}`).join("\n");
 await bot.sendMessage(chatId, t(hLang, "create_success", enlace, listaStr, limiteTxt), { parse_mode: "Markdown" });
+await logCanal(`🔗 Enlace creado: ${idUnico} por ID ${userId} — Canales: ${canalesGuardados.join(", ")}`);
 } catch (error) {
 console.error(error);
 await bot.sendMessage(chatId, t(hLang, "create_error"));
@@ -338,9 +366,11 @@ await refDoc.set({ activo: true, referidos: firebaseAdmin.firestore.FieldValue.i
 await ref.update({ refRecompensado: true });
 const rLang = await getLang(parseInt(referidoPor));
 await bot.sendMessage(parseInt(referidoPor), t(rLang, "ref_reward_notify", userId.toString(), DIAS_POR_REFERIDO), { parse_mode: "Markdown" });
+await logCanal(`🎉 Referido: ID ${userId} se hizo creador (pago con Stars) — referente ID ${referidoPor} ganó ${DIAS_POR_REFERIDO} días VIP`);
 }
 } catch (error) { console.error("Error al recompensar referido por pago:", error); }
 await bot.sendMessage(chatId, t(lang, "pago_ok", plan.nombre, plan.dias, formatearFecha(firebaseAdmin.firestore.Timestamp.fromDate(nuevaFecha), lang)), { parse_mode: "Markdown" });
+await logCanal(`💰 Pago con Stars: ${nombreUsuario(from)} (ID: ${userId}) — Plan ${plan.nombre} — ${plan.stars} ⭐ — ${plan.dias} días`);
 try {
 const aLang = await getLang(MI_ID_ADMIN);
 await bot.sendMessage(MI_ID_ADMIN, t(aLang, "pago_admin", nombreUsuario(from), userId, plan.nombre, plan.stars), { parse_mode: "Markdown" });
@@ -450,6 +480,7 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "panel_gen_key_btn"), callback_data: "panel_generar_clave" }],
 [{ text: t(lang, "panel_stats_btn"), callback_data: "panel_stats" }],
 [{ text: t(lang, "panel_export_btn"), callback_data: "panel_export" }],
+[{ text: t(lang, "panel_backup_btn"), callback_data: "panel_respaldo" }],
 [{ text: t(lang, "panel_canal_btn"), callback_data: "panel_canal" }],
 [{ text: t(lang, (await enMantenimiento()) ? "panel_maint_btn_on" : "panel_maint_btn_off"), callback_data: "panel_mantenimiento" }],
 ]},
@@ -588,6 +619,7 @@ delete estadosSoporte[chatId];
 try {
 await bot.forwardMessage(MI_ID_ADMIN, chatId, msg.message_id);
 await bot.sendMessage(chatId, t(lang, "support_sent"));
+await logCanal(`🆘 Soporte de ${nombreUsuario(msg.from)} (ID: ${userId}): ${texto}`);
 } catch (error) { console.error(error); }
 return;
 }
@@ -709,8 +741,9 @@ if (texto === "/generar_clave") {
 if (userId !== MI_ID_ADMIN) return void bot.sendMessage(chatId, t(lang, "unauthorized"));
 const nuevaClave = "VIP-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 try {
-await db.collection("claves").doc(nuevaClave).set({ usada: false, dias: 30, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
-return void bot.sendMessage(chatId, t(lang, "key_generated", nuevaClave), { parse_mode: "Markdown" });
+await db.collection("claves").doc(nuevaClave).set({ usada: false, dias: 30, plan: "ilimitado", fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
+await logCanal(`🗝️ Clave generada: ${nuevaClave} — Plan Ilimitado (30 días)`);
+return void bot.sendMessage(chatId, t(lang, "key_generated_days", nuevaClave, "Ilimitado", 30), { parse_mode: "Markdown" });
 } catch (error) {
 console.error(error);
 return void bot.sendMessage(chatId, t(lang, "key_error"));
@@ -727,14 +760,17 @@ if (!claveDoc.exists) return void bot.sendMessage(chatId, t(lang, "key_not_found
 if (claveDoc.data()?.["usada"]) return void bot.sendMessage(chatId, t(lang, "key_used"));
 await claveRef.update({ usada: true, usadaPor: userId });
 const diasClave = claveDoc.data()?.["dias"] ?? 30;
+const planClave = claveDoc.data()?.["plan"] ?? null;
 const venceClave = new Date();
 venceClave.setDate(venceClave.getDate() + diasClave);
 await db.collection("creadores").doc(userId.toString()).set({
 activo: false, pendiente: true,
+...(planClave ? { plan: planClave } : {}),
 fechaIngreso: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
 fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(venceClave),
 });
 await notificarAdminPendiente(userId);
+await logCanal(`🗝️ Clave canjeada: ${nombreUsuario(msg.from)} (ID: ${userId}) — ${clave}${planClave ? ` — Plan ${PLANES[planClave]?.nombre ?? planClave}` : ""}`);
 return void bot.sendMessage(chatId, t(lang, "key_valid"), { parse_mode: "Markdown" });
 } catch (error) {
 console.error(error);
@@ -793,6 +829,8 @@ const lang = await getLang(userId);
 
 if (data === "set_lang_es" || data === "set_lang_en") {
 const newLang = data === "set_lang_es" ? "es" : "en";
+const uPrevio = await db.collection("usuarios").doc(userId.toString()).get();
+if (!uPrevio.exists) await logCanal(`👤 Usuario nuevo: ${nombreUsuario(query.from)} (ID: ${userId})`);
 await setLang(userId, newLang);
 const gate = await verificarCanalGlobal(userId);
 if (!gate.ok) {
@@ -838,6 +876,7 @@ fechaIngreso: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
 fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(vence),
 }, { merge: true });
 await bot.sendMessage(chatId, t(lang, "trial_ok"), { parse_mode: "Markdown" });
+await logCanal(`🎁 Prueba 24 h activada: ID ${userId}`);
 } catch (error) { console.error(error); }
 return;
 }
@@ -1124,9 +1163,11 @@ await refDoc.set({ activo: true, referidos: firebaseAdmin.firestore.FieldValue.i
 await db.collection("creadores").doc(uid).update({ refRecompensado: true });
 const rLang = await getLang(parseInt(referidoPor));
 await bot.sendMessage(parseInt(referidoPor), t(rLang, "ref_reward_notify", uid, DIAS_POR_REFERIDO), { parse_mode: "Markdown" });
+await logCanal(`🎉 Referido: ID ${uid} se hizo creador — referente ID ${referidoPor} ganó ${DIAS_POR_REFERIDO} días VIP`);
 }
 } catch (error) { console.error("Error al recompensar referido:", error); }
 await bot.editMessageText(t(lang, "approved_admin", uid), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" });
+await logCanal(`✅ Creador aprobado: ID ${uid}`);
 const uLang = await getLang(parseInt(uid));
 await bot.sendMessage(parseInt(uid), t(uLang, "approved_notify"), { parse_mode: "Markdown" });
 } catch (error) { console.error(error); }
@@ -1139,6 +1180,7 @@ const uid = data.replace("rechazar_creador_", "");
 try {
 await db.collection("creadores").doc(uid).update({ activo: false, pendiente: false });
 await bot.editMessageText(t(lang, "rejected_admin", uid), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown" });
+await logCanal(`❌ Creador rechazado: ID ${uid}`);
 const uLang = await getLang(parseInt(uid));
 await bot.sendMessage(parseInt(uid), t(uLang, "rejected_notify"), { parse_mode: "Markdown" });
 } catch (error) { console.error(error); }
@@ -1179,24 +1221,17 @@ return;
 if (data === "panel_export") {
 try {
 await bot.editMessageText(t(lang, "export_generating"), { chat_id: chatId, message_id: messageId });
-const [uSnap, eSnap, dSnap, pgSnap] = await Promise.all([
-db.collection("usuarios").limit(1000).get(),
-db.collection("enlaces").limit(1000).get(),
-db.collection("desbloqueos").limit(1000).get(),
-db.collection("pagos").limit(1000).get(),
-]);
-const fmt = (ts) => ts?.toDate ? ts.toDate().toISOString() : "";
-const usuarios = uSnap.docs.map((d) => ({ id: d.id, idioma: d.data()["lang"] ?? "", referidoPor: d.data()["referidoPor"] ?? "" }));
-const enlaces = eSnap.docs.map((d) => ({ id: d.id, creador: d.data()["creador"] ?? "", canales: (d.data()["canales"] ?? []).join(", "), visitas: d.data()["visitas"] ?? 0, desbloqueos: d.data()["desbloqueos"] ?? 0, expiraEl: fmt(d.data()["expiraEl"]), limiteUsos: d.data()["limiteUsos"] ?? "", fecha: fmt(d.data()["fecha"]) }));
-const desbloqueos = dSnap.docs.map((d) => ({ enlaceId: d.data()["enlaceId"] ?? "", creador: d.data()["creador"] ?? "", userId: d.data()["userId"] ?? "", nombre: d.data()["nombre"] ?? "", fecha: fmt(d.data()["fecha"]) }));
-const wb = XLSX.utils.book_new();
-XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(usuarios), "Usuarios");
-XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(enlaces), "Enlaces");
-const pagos = pgSnap.docs.map((d) => ({ id: d.id, userId: d.data()["userId"] ?? "", plan: d.data()["plan"] ?? "", stars: d.data()["stars"] ?? 0, dias: d.data()["dias"] ?? 0, chargeId: d.data()["chargeId"] ?? "", fecha: fmt(d.data()["fecha"]) }));
-XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(desbloqueos), "Desbloqueos");
-XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pagos), "Pagos");
-const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+const buf = await generarExcelBuffer();
 await bot.sendDocument(chatId, buf, { caption: t(lang, "export_ready") }, { filename: "sub2unlock-datos.xlsx", contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+} catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "export_error")); }
+return;
+}
+
+if (data === "panel_respaldo") {
+try {
+const buf = await generarExcelBuffer();
+await bot.sendDocument(LOG_CHANNEL_ID, buf, { caption: `📦 Respaldo manual Sub2Unlock — ${new Date().toISOString().slice(0, 10)}` }, { filename: "sub2unlock-respaldo.xlsx", contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+await bot.editMessageText(t(lang, "backup_sent"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
 } catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "export_error")); }
 return;
 }
@@ -1222,11 +1257,12 @@ return;
 }
 
 if (data === "panel_generar_clave") {
-await bot.editMessageText(t(lang, "key_choose_days"), {
+await bot.editMessageText(t(lang, "key_choose_plan"), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [
-[{ text: "1 día", callback_data: "gen_clave_1" }, { text: "7 días", callback_data: "gen_clave_7" }],
-[{ text: "15 días", callback_data: "gen_clave_15" }, { text: "30 días", callback_data: "gen_clave_30" }],
+[{ text: "🥉 Básico (7 días)", callback_data: "gen_clave_basico" }],
+[{ text: "🥈 Pro (15 días)", callback_data: "gen_clave_pro" }],
+[{ text: "🥇 Ilimitado (30 días)", callback_data: "gen_clave_ilimitado" }],
 [{ text: t(lang, "menu_back"), callback_data: "panel_main" }],
 ] },
 });
@@ -1234,11 +1270,15 @@ return;
 }
 
 if (data.startsWith("gen_clave_")) {
-const dias = parseInt(data.replace("gen_clave_", "")) || 30;
+const planKey = data.replace("gen_clave_", "");
+const plan = PLANES[planKey];
+if (!plan) return;
+const dias = plan.dias;
 const nuevaClave = "VIP-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 try {
-await db.collection("claves").doc(nuevaClave).set({ usada: false, dias, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
-await bot.editMessageText(t(lang, "key_generated_days", nuevaClave, dias), {
+await db.collection("claves").doc(nuevaClave).set({ usada: false, dias, plan: planKey, fechaCreacion: firebaseAdmin.firestore.FieldValue.serverTimestamp() });
+await logCanal(`🗝️ Clave generada: ${nuevaClave} — Plan ${plan.nombre} (${dias} días)`);
+await bot.editMessageText(t(lang, "key_generated_days", nuevaClave, plan.nombre, dias), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] },
 });
@@ -1283,6 +1323,16 @@ return;
 
 async function trabajoPeriodico() {
 try {
+const hoyStr = new Date().toISOString().slice(0, 10);
+try {
+const resRef = db.collection("config").doc("respaldo");
+const resDoc = await resRef.get();
+if (!resDoc.exists || resDoc.data()?.["ultimo"] !== hoyStr) {
+const buf = await generarExcelBuffer();
+await bot.sendDocument(LOG_CHANNEL_ID, buf, { caption: `📦 Respaldo diario Sub2Unlock — ${hoyStr}` }, { filename: "sub2unlock-respaldo.xlsx", contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+await resRef.set({ ultimo: hoyStr }, { merge: true });
+}
+} catch (e) { console.error("Error en respaldo diario:", e); }
 const ahora = new Date();
 const en24h = new Date(ahora.getTime() + 24 * 60 * 60 * 1000);
 const snap = await db.collection("creadores").where("activo", "==", true).get();
