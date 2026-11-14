@@ -18,6 +18,7 @@ const COMANDOS_MENU = [
 { command: "activar", description: "Canjear una clave VIP" },
 { command: "idioma", description: "Cambiar idioma" },
 { command: "cancelar", description: "Cancelar la creación de un enlace" },
+{ command: "planes", description: "Ver planes VIP y pagar con Stars" },
 ];
 bot.setMyCommands(COMANDOS_MENU).catch((e) => console.error("Error al poner comandos:", e.message));
 bot.setMyCommands(COMANDOS_MENU, { language_code: "es" }).catch((e) => console.error("Error al poner comandos es:", e.message));
@@ -28,6 +29,11 @@ const estadosCaptcha = {};
 const estadosCanal = {};
 const DIAS_POR_REFERIDO = 3;
 const MINUTOS_AUTOBORRADO = 5;
+const PLANES = {
+basico: { dias: 7, stars: 100, maxEnlaces: 3, nombre: "Básico" },
+pro: { dias: 15, stars: 200, maxEnlaces: 10, nombre: "Pro" },
+ilimitado: { dias: 30, stars: 300, maxEnlaces: 0, nombre: "Ilimitado" },
+};
 
 function nombreUsuario(from) {
 return from?.username ? `@${from.username}` : (from?.first_name ?? "usuario");
@@ -269,6 +275,82 @@ return void bot.sendMessage(chatId, t(lang, "error_generic"));
 }
 }
 
+async function mostrarPlanes(chatId, lang, messageId) {
+const botones = [
+[{ text: t(lang, "plan_buy_basico"), callback_data: "buy_basico" }],
+[{ text: t(lang, "plan_buy_pro"), callback_data: "buy_pro" }],
+[{ text: t(lang, "plan_buy_ilimitado"), callback_data: "buy_ilimitado" }],
+];
+if (messageId) botones.push([{ text: t(lang, "menu_back"), callback_data: "menu_main" }]);
+if (messageId) {
+await bot.editMessageText(t(lang, "planes_text"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: botones } });
+return;
+}
+await bot.sendMessage(chatId, t(lang, "planes_text"), { parse_mode: "Markdown", reply_markup: { inline_keyboard: botones } });
+}
+
+async function enviarFacturaPlan(chatId, planKey, lang) {
+const plan = PLANES[planKey];
+if (!plan) return;
+await bot.sendInvoice(chatId, t(lang, "plan_title", plan.nombre), t(lang, "plan_desc", plan.nombre, plan.dias), `stars_${planKey}`, "", "XTR", [{ label: t(lang, "plan_title", plan.nombre), amount: plan.stars }]);
+}
+
+async function procesarPagoStars(chatId, userId, pago, lang, from) {
+try {
+const payload = pago?.invoice_payload ?? "";
+if (!payload.startsWith("stars_")) return;
+const planKey = payload.replace("stars_", "");
+const plan = PLANES[planKey];
+if (!plan) return;
+const chargeId = pago?.telegram_payment_charge_id ?? "";
+if (chargeId) {
+const yaPagado = await db.collection("pagos").where("chargeId", "==", chargeId).limit(1).get();
+if (!yaPagado.empty) return;
+}
+const ref = db.collection("creadores").doc(userId.toString());
+const doc = await ref.get();
+const ahora = new Date();
+const base = doc.exists && doc.data()?.["fechaVencimiento"]?.toDate() > ahora ? doc.data()["fechaVencimiento"].toDate() : ahora;
+const nuevaFecha = new Date(base);
+nuevaFecha.setDate(nuevaFecha.getDate() + plan.dias);
+const update = {
+activo: true, pendiente: false, plan: planKey,
+fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(nuevaFecha),
+avisoVencimiento: false,
+};
+if (!doc.exists) update.fechaIngreso = firebaseAdmin.firestore.FieldValue.serverTimestamp();
+await ref.set(update, { merge: true });
+await db.collection("pagos").add({
+userId, plan: planKey, stars: plan.stars, dias: plan.dias, chargeId,
+fecha: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+});
+try {
+const uDoc = await db.collection("usuarios").doc(userId.toString()).get();
+const referidoPor = uDoc.exists ? uDoc.data()?.["referidoPor"] : null;
+const cDoc = await ref.get();
+if (referidoPor && !cDoc.data()?.["refRecompensado"]) {
+const refDoc = db.collection("creadores").doc(referidoPor.toString());
+const refDocSnap = await refDoc.get();
+const baseRef = refDocSnap.exists && refDocSnap.data()?.["fechaVencimiento"]?.toDate() > new Date() ? refDocSnap.data()["fechaVencimiento"].toDate() : new Date();
+const nuevaFechaRef = new Date(baseRef);
+nuevaFechaRef.setDate(nuevaFechaRef.getDate() + DIAS_POR_REFERIDO);
+await refDoc.set({ activo: true, referidos: firebaseAdmin.firestore.FieldValue.increment(1), diasGanados: firebaseAdmin.firestore.FieldValue.increment(DIAS_POR_REFERIDO), fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(nuevaFechaRef), avisoVencimiento: false }, { merge: true });
+await ref.update({ refRecompensado: true });
+const rLang = await getLang(parseInt(referidoPor));
+await bot.sendMessage(parseInt(referidoPor), t(rLang, "ref_reward_notify", userId.toString(), DIAS_POR_REFERIDO), { parse_mode: "Markdown" });
+}
+} catch (error) { console.error("Error al recompensar referido por pago:", error); }
+await bot.sendMessage(chatId, t(lang, "pago_ok", plan.nombre, plan.dias, formatearFecha(firebaseAdmin.firestore.Timestamp.fromDate(nuevaFecha), lang)), { parse_mode: "Markdown" });
+try {
+const aLang = await getLang(MI_ID_ADMIN);
+await bot.sendMessage(MI_ID_ADMIN, t(aLang, "pago_admin", nombreUsuario(from), userId, plan.nombre, plan.stars), { parse_mode: "Markdown" });
+} catch (e) {}
+} catch (error) {
+console.error("Error al procesar pago con Stars:", error);
+await bot.sendMessage(chatId, t(lang, "pago_error"));
+}
+}
+
 async function mostrarMenuCreador(chatId, lang) {
 await bot.sendMessage(chatId, t(lang, "menu_title"), {
 parse_mode: "Markdown",
@@ -279,6 +361,7 @@ inline_keyboard: [
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
 [{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
 [{ text: t(lang, "menu_referidos"), callback_data: "menu_referidos" }],
+[{ text: t(lang, "planes_btn"), callback_data: "menu_planes" }],
 [{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ],
 },
@@ -295,9 +378,11 @@ const data = doc.data();
 const activo = data["activo"] ?? false;
 const pendiente = data["pendiente"] ?? false;
 const estadoStr = activo ? t(lang, "status_active") : (pendiente ? t(lang, "status_pending_label") : t(lang, "status_inactive"));
+const planLine = data["plan"] && PLANES[data["plan"]] ? t(lang, "status_plan", PLANES[data["plan"]].nombre) : "";
 const texto = [
 t(lang, "status_title"),
 `Estado: ${estadoStr}`,
+...(planLine ? [planLine] : []),
 `${t(lang, "status_member_since")} ${formatearFecha(data["fechaIngreso"], lang)}`,
 `${t(lang, "status_expires")} ${formatearFecha(data["fechaVencimiento"], lang)}`,
 tiempoRestante(data["fechaVencimiento"], lang),
@@ -493,6 +578,11 @@ const userId = msg.from?.id;
 if (!userId) return;
 const lang = await getLang(userId);
 
+if (msg.successful_payment) {
+await procesarPagoStars(chatId, userId, msg.successful_payment, lang, msg.from);
+return;
+}
+
 if (estadosSoporte[chatId] && texto && !texto.startsWith("/")) {
 delete estadosSoporte[chatId];
 try {
@@ -610,6 +700,11 @@ return void bot.sendMessage(chatId, t(lang, "access_denied"), { parse_mode: "Mar
 return void mostrarMenuCreador(chatId, lang);
 }
 
+if (texto === "/planes") {
+if (!await exigeCanalGlobal(chatId, userId, lang)) return;
+return void mostrarPlanes(chatId, lang);
+}
+
 if (texto === "/generar_clave") {
 if (userId !== MI_ID_ADMIN) return void bot.sendMessage(chatId, t(lang, "unauthorized"));
 const nuevaClave = "VIP-" + Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -673,6 +768,20 @@ reply_markup: { inline_keyboard: [
 }
 });
 
+bot.on("pre_checkout_query", async (query) => {
+try {
+const payload = query.invoice_payload ?? "";
+const planKey = payload.replace("stars_", "");
+if (!payload.startsWith("stars_") || !PLANES[planKey]) {
+return void bot.answerPreCheckoutQuery(query.id, false, { error_message: "Plan no válido." });
+}
+await bot.answerPreCheckoutQuery(query.id, true);
+} catch (error) {
+console.error("Error en pre-checkout:", error);
+try { await bot.answerPreCheckoutQuery(query.id, false, { error_message: "Error al procesar el pago." }); } catch (e) {}
+}
+});
+
 bot.on("callback_query", async (query) => {
 const chatId = query.message?.chat.id;
 const messageId = query.message?.message_id;
@@ -700,6 +809,7 @@ await bot.editMessageText(t(newLang, "language_set") + "\n\n" + t(newLang, "star
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [
 [{ text: t(newLang, "trial_btn"), callback_data: "probar_24h" }],
+[{ text: t(newLang, "planes_btn"), callback_data: "planes_ver" }],
 [{ text: t(newLang, "menu_support"), callback_data: "soporte" }],
 ] },
 });
@@ -729,6 +839,29 @@ fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(vence),
 }, { merge: true });
 await bot.sendMessage(chatId, t(lang, "trial_ok"), { parse_mode: "Markdown" });
 } catch (error) { console.error(error); }
+return;
+}
+
+if (data === "planes_ver") {
+await mostrarPlanes(chatId, lang);
+return;
+}
+
+if (data === "menu_planes") {
+await mostrarPlanes(chatId, lang, messageId);
+return;
+}
+
+if (data.startsWith("buy_")) {
+const planKey = data.replace("buy_", "");
+if (!PLANES[planKey]) return;
+if (!await exigeCanalGlobal(chatId, userId, lang)) return;
+try {
+await enviarFacturaPlan(chatId, planKey, lang);
+} catch (error) {
+console.error("Error al enviar factura:", error);
+await bot.sendMessage(chatId, t(lang, "error_generic"));
+}
 return;
 }
 
@@ -793,6 +926,7 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "menu_create"), callback_data: "menu_crear" }],
 [{ text: t(lang, "menu_stats"), callback_data: "menu_stats" }],
 [{ text: t(lang, "menu_referidos"), callback_data: "menu_referidos" }],
+[{ text: t(lang, "planes_btn"), callback_data: "menu_planes" }],
 [{ text: t(lang, "menu_support"), callback_data: "soporte" }],
 ]},
 });
@@ -810,6 +944,15 @@ if (data === "menu_crear") {
 if (!await estaVigente(userId)) {
 await bot.editMessageText(t(lang, "access_denied"), { chat_id: chatId, message_id: messageId });
 return;
+}
+const docCreador = await db.collection("creadores").doc(userId.toString()).get();
+const planActual = docCreador.exists ? PLANES[docCreador.data()?.["plan"]] : null;
+if (planActual && planActual.maxEnlaces > 0) {
+const totalEnlaces = (await db.collection("enlaces").where("creador", "==", userId).get()).size;
+if (totalEnlaces >= planActual.maxEnlaces) {
+await bot.editMessageText(t(lang, "plan_limit", planActual.maxEnlaces, planActual.nombre), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "menu_main" }]] } });
+return;
+}
 }
 estadosCreacion[chatId] = { paso: 1, canales: [], lang };
 await bot.editMessageText(t(lang, "create_step1_empty"), {
@@ -1011,11 +1154,12 @@ if (data.startsWith("panel_creator_")) { await mostrarCreadorAdmin(chatId, messa
 
 if (data === "panel_stats") {
 try {
-const [uSnap, cSnap, eSnap, dSnap] = await Promise.all([
+const [uSnap, cSnap, eSnap, dSnap, pSnap] = await Promise.all([
 db.collection("usuarios").get(),
 db.collection("creadores").where("activo", "==", true).get(),
 db.collection("enlaces").get(),
 db.collection("desbloqueos").get(),
+db.collection("pagos").get(),
 ]);
 const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
 const hoySnap = await db.collection("desbloqueos").where("fecha", ">=", firebaseAdmin.firestore.Timestamp.fromDate(hoy)).get();
@@ -1024,6 +1168,8 @@ eSnap.docs.forEach((d) => { const c = d.data()["creador"]; porCreador[c] = (porC
 let topId = ""; let topN = 0;
 Object.entries(porCreador).forEach(([id, n]) => { if (n > topN) { topN = n; topId = id; } });
 const lineas = [t(lang, "stats_global_title"), t(lang, "stats_users", uSnap.size), t(lang, "stats_creators", cSnap.size), t(lang, "stats_links", eSnap.size), t(lang, "stats_unlocks", dSnap.size), t(lang, "stats_unlocks_today", hoySnap.size)];
+const totalStars = pSnap.docs.reduce((s, d) => s + (d.data()["stars"] ?? 0), 0);
+lineas.push(t(lang, "stats_pagos", pSnap.size, totalStars));
 lineas.push(topId ? t(lang, "stats_top_creator", topId, topN) : t(lang, "stats_none"));
 await bot.editMessageText(lineas.join("\n"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
 } catch (error) { console.error(error); }
@@ -1033,10 +1179,11 @@ return;
 if (data === "panel_export") {
 try {
 await bot.editMessageText(t(lang, "export_generating"), { chat_id: chatId, message_id: messageId });
-const [uSnap, eSnap, dSnap] = await Promise.all([
+const [uSnap, eSnap, dSnap, pgSnap] = await Promise.all([
 db.collection("usuarios").limit(1000).get(),
 db.collection("enlaces").limit(1000).get(),
 db.collection("desbloqueos").limit(1000).get(),
+db.collection("pagos").limit(1000).get(),
 ]);
 const fmt = (ts) => ts?.toDate ? ts.toDate().toISOString() : "";
 const usuarios = uSnap.docs.map((d) => ({ id: d.id, idioma: d.data()["lang"] ?? "", referidoPor: d.data()["referidoPor"] ?? "" }));
@@ -1045,7 +1192,9 @@ const desbloqueos = dSnap.docs.map((d) => ({ enlaceId: d.data()["enlaceId"] ?? "
 const wb = XLSX.utils.book_new();
 XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(usuarios), "Usuarios");
 XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(enlaces), "Enlaces");
+const pagos = pgSnap.docs.map((d) => ({ id: d.id, userId: d.data()["userId"] ?? "", plan: d.data()["plan"] ?? "", stars: d.data()["stars"] ?? 0, dias: d.data()["dias"] ?? 0, chargeId: d.data()["chargeId"] ?? "", fecha: fmt(d.data()["fecha"]) }));
 XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(desbloqueos), "Desbloqueos");
+XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(pagos), "Pagos");
 const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 await bot.sendDocument(chatId, buf, { caption: t(lang, "export_ready") }, { filename: "sub2unlock-datos.xlsx", contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 } catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "export_error")); }
