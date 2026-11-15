@@ -20,8 +20,26 @@ const COMANDOS_MENU = [
 { command: "cancelar", description: "Cancelar la creación de un enlace" },
 { command: "planes", description: "Ver planes VIP y pagar con Stars" },
 ];
+const COMANDOS_MENU_RU = [
+{ command: "start", description: "Запустить бота и выбрать язык" },
+{ command: "menu", description: "Моя панель создателя" },
+{ command: "activar", description: "Использовать VIP-ключ" },
+{ command: "idioma", description: "Сменить язык" },
+{ command: "cancelar", description: "Отменить создание ссылки" },
+{ command: "planes", description: "Посмотреть VIP-тарифы и оплатить Stars" },
+];
+const COMANDOS_MENU_HI = [
+{ command: "start", description: "बॉट शुरू करें और भाषा चुनें" },
+{ command: "menu", description: "मेरा क्रिएटर पैनल" },
+{ command: "activar", description: "VIP कुंजी रिडीम करें" },
+{ command: "idioma", description: "भाषा बदलें" },
+{ command: "cancelar", description: "लिंक बनाना रद्द करें" },
+{ command: "planes", description: "VIP प्लान देखें और Stars से भुगतान करें" },
+];
 bot.setMyCommands(COMANDOS_MENU).catch((e) => console.error("Error al poner comandos:", e.message));
 bot.setMyCommands(COMANDOS_MENU, { language_code: "es" }).catch((e) => console.error("Error al poner comandos es:", e.message));
+bot.setMyCommands(COMANDOS_MENU_RU, { language_code: "ru" }).catch((e) => console.error("Error al poner comandos ru:", e.message));
+bot.setMyCommands(COMANDOS_MENU_HI, { language_code: "hi" }).catch((e) => console.error("Error al poner comandos hi:", e.message));
 const estadosCreacion = {};
 
 const estadosSoporte = {};
@@ -217,7 +235,8 @@ async function getLang(userId) {
 if (langCache[userId]) return langCache[userId];
 try {
 const doc = await db.collection("usuarios").doc(userId.toString()).get();
-const lang = doc.exists ? (doc.data()["lang"] ?? "es") : "es";
+const rawLang = doc.exists ? (doc.data()["lang"] ?? "es") : "es";
+const lang = ["es", "en", "ru", "hi"].includes(rawLang) ? rawLang : "es";
 langCache[userId] = lang;
 return lang;
 } catch { return "es"; }
@@ -236,7 +255,8 @@ return f;
 
 function formatearFecha(ts, lang) {
 if (!ts) return t(lang, "no_date");
-return ts.toDate().toLocaleDateString(lang === "en" ? "en-US" : "es-ES", {
+const LOCALES_FECHA = { es: "es-ES", en: "en-US", ru: "ru-RU", hi: "hi-IN" };
+return ts.toDate().toLocaleDateString(LOCALES_FECHA[lang] ?? "es-ES", {
 day: "2-digit", month: "2-digit", year: "numeric",
 hour: "2-digit", minute: "2-digit",
 });
@@ -820,8 +840,10 @@ await uRef.set({ referidoPor: refId }, { merge: true });
 await bot.sendMessage(chatId, t(lang, "choose_language"), {
 parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [
-[{ text: "Espanol", callback_data: "set_lang_es" }],
+[{ text: "Español", callback_data: "set_lang_es" }],
 [{ text: "English", callback_data: "set_lang_en" }],
+[{ text: "Русский", callback_data: "set_lang_ru" }],
+[{ text: "हिन्दी", callback_data: "set_lang_hi" }],
 ] },
 });
 return;
@@ -835,8 +857,10 @@ if (texto === "/start") {
 await bot.sendMessage(chatId, t(lang, "choose_language"), {
 parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [
-[{ text: "Espanol", callback_data: "set_lang_es" }],
+[{ text: "Español", callback_data: "set_lang_es" }],
 [{ text: "English", callback_data: "set_lang_en" }],
+[{ text: "Русский", callback_data: "set_lang_ru" }],
+[{ text: "हिन्दी", callback_data: "set_lang_hi" }],
 ]},
 });
 return;
@@ -846,8 +870,10 @@ if (texto === "/idioma" || texto === "/language") {
 await bot.sendMessage(chatId, t(lang, "choose_language"), {
 parse_mode: "Markdown",
 reply_markup: { inline_keyboard: [
-[{ text: "Espanol", callback_data: "set_lang_es" }],
+[{ text: "Español", callback_data: "set_lang_es" }],
 [{ text: "English", callback_data: "set_lang_en" }],
+[{ text: "Русский", callback_data: "set_lang_ru" }],
+[{ text: "हिन्दी", callback_data: "set_lang_hi" }],
 ]},
 });
 return;
@@ -1062,8 +1088,9 @@ if (!chatId || !messageId) return;
 void bot.answerCallbackQuery(query.id);
 const lang = await getLang(userId);
 
-if (data === "set_lang_es" || data === "set_lang_en") {
-const newLang = data === "set_lang_es" ? "es" : "en";
+if (data.startsWith("set_lang_")) {
+const newLang = data.slice("set_lang_".length);
+if (!["es", "en", "ru", "hi"].includes(newLang)) return;
 const uPrevio = await db.collection("usuarios").doc(userId.toString()).get();
 if (!uPrevio.exists) await logCanal(`👤 Usuario nuevo: ${nombreUsuario(query.from)} (ID: ${userId})`);
 await setLang(userId, newLang);
