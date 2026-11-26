@@ -50,6 +50,7 @@ const estadosCupon = {};
 const estadosCuponUsuario = {};
 const estadosBienvenida = {};
 const estadosActivar = {};
+const estadosDifusion = {};
 const clavesPasadas = new Map();
 const DIAS_POR_REFERIDO = 3;
 const MINUTOS_AUTOBORRADO = 5;
@@ -621,6 +622,44 @@ reply_markup: { inline_keyboard: botones },
 });
 }
 
+// ---- v5.3: difusión / mensaje global ----
+// Destinatarios de la difusión. "vip" = solo creadores con VIP vigente
+// (activo y fechaVencimiento futura). El admin nunca se incluye: él recibe el resumen.
+async function destinatariosDifusion(audiencia) {
+if (audiencia === "vip") {
+const snap = await db.collection("creadores").where("activo", "==", true).get();
+const ahora = new Date();
+return snap.docs.filter((d) => {
+if (d.id === String(MI_ID_ADMIN)) return false;
+const venc = d.data()["fechaVencimiento"];
+return !!venc && typeof venc.toDate === "function" && venc.toDate() > ahora;
+}).map((d) => d.id);
+}
+const snap = await db.collection("usuarios").get();
+return snap.docs.map((d) => d.id).filter((id) => id !== String(MI_ID_ADMIN));
+}
+
+// Envía con Markdown; si el texto rompe el Markdown, reintenta sin formato.
+async function enviarTextoSeguro(chatId, texto, opciones) {
+try { return await bot.sendMessage(chatId, texto, { ...(opciones ?? {}), parse_mode: "Markdown" }); }
+catch (e) { return await bot.sendMessage(chatId, texto, opciones ?? {}); }
+}
+
+// Envía a cada destinatario con pausa de 100 ms (flood control de Telegram).
+// Un fallo (p. ej. 403 por bloqueo) no tumba el envío: se cuenta y se sigue.
+async function enviarDifusion(ids, texto) {
+let ok = 0; let fallos = 0;
+for (const id of ids) {
+try { await bot.sendMessage(id, texto, { parse_mode: "Markdown" }); ok++; }
+catch (e) {
+try { await bot.sendMessage(id, texto); ok++; }
+catch (e2) { fallos++; }
+}
+await new Promise((r) => setTimeout(r, 100));
+}
+return { ok, fallos };
+}
+
 async function mostrarPanelPrincipal(chatId) {
 const lang = await getLang(MI_ID_ADMIN);
 const snap = await db.collection("creadores").where("pendiente", "==", true).get();
@@ -635,6 +674,7 @@ reply_markup: { inline_keyboard: [
 [{ text: t(lang, "panel_export_btn"), callback_data: "panel_export" }],
 [{ text: t(lang, "panel_backup_btn"), callback_data: "panel_respaldo" }],
 [{ text: t(lang, "panel_canal_btn"), callback_data: "panel_canal" }],
+[{ text: t(lang, "panel_difusion_btn"), callback_data: "panel_difusion" }],
 [{ text: t(lang, (await enMantenimiento()) ? "panel_maint_btn_on" : "panel_maint_btn_off"), callback_data: "panel_mantenimiento" }],
 ]},
 });
@@ -952,8 +992,11 @@ return void canjearClave(chatId, userId, clave, lang, msg.from);
 if (texto === "/cancelar" || texto === "/cancel") {
 const habiaActivar = !!estadosActivar[chatId];
 if (estadosActivar[chatId]) delete estadosActivar[chatId];
+const habiaDifusion = !!estadosDifusion[chatId];
+if (estadosDifusion[chatId]) delete estadosDifusion[chatId];
 if (estadosCreacion[chatId]) { delete estadosCreacion[chatId]; return void bot.sendMessage(chatId, t(lang, "cancel_ok")); }
 if (habiaActivar) return void bot.sendMessage(chatId, t(lang, "cancel_ok"));
+if (habiaDifusion) return void bot.sendMessage(chatId, t(lang, "cancel_ok"));
 return void bot.sendMessage(chatId, t(lang, "cancel_none"));
 }
 
@@ -961,6 +1004,20 @@ if (estadosActivar[chatId] && texto && !texto.startsWith("/")) {
 delete estadosActivar[chatId];
 const clave = texto.trim().toUpperCase();
 await canjearClave(chatId, userId, clave, lang, msg.from);
+return;
+}
+
+if (userId === MI_ID_ADMIN && estadosDifusion[chatId] && texto && !texto.startsWith("/")) {
+const est = estadosDifusion[chatId];
+if (est.paso === "mensaje") {
+est.texto = texto;
+est.paso = "confirmar";
+const audTxt = t(lang, est.audiencia === "todos" ? "difusion_aud_all" : "difusion_aud_vip");
+await enviarTextoSeguro(chatId, t(lang, "difusion_preview", audTxt, est.ids.length, texto), { reply_markup: { inline_keyboard: [
+[{ text: t(lang, "difusion_send_btn"), callback_data: "difusion_enviar" }],
+[{ text: t(lang, "difusion_cancel_btn"), callback_data: "difusion_cancelar" }],
+] } });
+}
 return;
 }
 
@@ -1109,6 +1166,7 @@ const userId = query.from.id;
 const data = query.data ?? "";
 if (!chatId || !messageId) return;
 if (data !== "activar_clave") delete estadosActivar[chatId];
+if (!data.startsWith("difusion") && data !== "panel_difusion") delete estadosDifusion[chatId];
 void bot.answerCallbackQuery(query.id);
 const lang = await getLang(userId);
 
@@ -1636,6 +1694,51 @@ const canales = await getCanalesObligatorios();
 await bot.editMessageText((canales.length ? t(lang, "canal_current", canales.join("\n")) + "\n\n" : "") + t(lang, "canal_ask"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
 estadosCanal[chatId] = true;
 } catch (error) { console.error(error); }
+return;
+}
+
+if (data === "panel_difusion") {
+try {
+const [todos, vips] = await Promise.all([destinatariosDifusion("todos"), destinatariosDifusion("vip")]);
+await bot.editMessageText(t(lang, "difusion_title"), { chat_id: chatId, message_id: messageId, parse_mode: "Markdown", reply_markup: { inline_keyboard: [
+[{ text: t(lang, "difusion_all_btn", todos.length), callback_data: "difusion_todos" }],
+[{ text: t(lang, "difusion_vip_btn", vips.length), callback_data: "difusion_vip" }],
+[{ text: t(lang, "menu_back"), callback_data: "panel_main" }],
+] } });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data === "difusion_todos" || data === "difusion_vip") {
+try {
+const audiencia = data === "difusion_todos" ? "todos" : "vip";
+const ids = await destinatariosDifusion(audiencia);
+if (ids.length === 0) {
+await bot.editMessageText(t(lang, "difusion_empty"), { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_difusion" }]] } });
+return;
+}
+estadosDifusion[chatId] = { audiencia, ids, paso: "mensaje", texto: "" };
+await bot.sendMessage(chatId, t(lang, "difusion_ask", t(lang, audiencia === "todos" ? "difusion_aud_all" : "difusion_aud_vip")), { parse_mode: "Markdown" });
+} catch (error) { console.error(error); }
+return;
+}
+
+if (data === "difusion_enviar") {
+const est = estadosDifusion[chatId];
+if (!est || est.paso !== "confirmar" || !est.texto) return;
+delete estadosDifusion[chatId];
+try {
+await bot.editMessageText(t(lang, "difusion_sending"), { chat_id: chatId, message_id: messageId });
+const res = await enviarDifusion(est.ids, est.texto);
+await bot.sendMessage(chatId, t(lang, "difusion_done", res.ok, res.fallos), { parse_mode: "Markdown" });
+await logCanal(`📢 Difusión enviada (${est.audiencia === "todos" ? "todos los usuarios" : "solo VIP"}): ${res.ok} enviados, ${res.fallos} fallidos`);
+} catch (error) { console.error(error); await bot.sendMessage(chatId, t(lang, "error_generic")); }
+return;
+}
+
+if (data === "difusion_cancelar") {
+delete estadosDifusion[chatId];
+await bot.editMessageText(t(lang, "difusion_cancelled"), { chat_id: chatId, message_id: messageId, reply_markup: { inline_keyboard: [[{ text: t(lang, "menu_back"), callback_data: "panel_main" }]] } });
 return;
 }
 
