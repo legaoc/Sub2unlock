@@ -1,6 +1,6 @@
 export const langs = {
 es: {
-start_welcome: "👋 ¡Hola! Soy el sistema de verificación de enlaces.\n\n🔒 Este bot es de acceso privado.\n\n• Si tienes una Clave Única: `/activar TU_CLAVE`\n• Si ya tienes acceso: `/menu`\n• Ver planes VIP: `/planes`",
+start_welcome: "👋 ¡Hola! Soy el sistema de verificación de enlaces.\n\n💎 Consulta los planes VIP en /planes y empieza a crear tus enlaces.\n\n• Si tienes una Clave Única: `/activar TU_CLAVE`\n• Si ya tienes acceso: `/menu`\n• Ver planes VIP: `/planes`\n\n📢 Novedades y actualizaciones: @sub2unlockt",
 choose_language: "🌐 *Elige tu idioma / Choose your language / Выберите язык / अपनी भाषा चुनें:*",
 language_set: "✅ Idioma establecido en *Español*.",
 menu_title: "👤 *Menú del Creador*\n\n¿Qué deseas hacer?",
@@ -179,7 +179,7 @@ bienvenida_removed: "✅ Mensaje de bienvenida eliminado.",
 },
 
 en: {
-start_welcome: "👋 Hello! I’m the link verification system.\n\n🔒 This bot is private access only.\n\n• If you have a Unique Key: `/activate YOUR_KEY`\n• If you already have access: `/menu`\n• See VIP plans: `/planes`",
+start_welcome: "👋 Hello! I’m the link verification system.\n\n💎 Check out the VIP plans in /planes and start creating your links.\n\n• If you have a Unique Key: `/activate YOUR_KEY`\n• If you already have access: `/menu`\n\n\n📢 News and updates: @sub2unlockt• See VIP plans: `/planes`",
 choose_language: "🌐 *Elige tu idioma / Choose your language / Выберите язык / अपनी भाषा चुनें:*",
 language_set: "✅ Language set to *English*.",
 menu_title: "👤 *Creator Menu*\n\nWhat would you like to do?",
@@ -358,7 +358,7 @@ bienvenida_removed: "✅ Welcome message removed.",
 },
 
 ru: {
-start_welcome: "👋 Привет! Я — система проверки ссылок.\n\n🔒 Этот бот — только для приватного доступа.\n\n• Если у тебя есть Уникальный ключ: `/activar ТВОЙ_КЛЮЧ`\n• Если у тебя уже есть доступ: `/menu`\n• Тарифы VIP: `/planes`",
+start_welcome: "👋 Привет! Я — система проверки ссылок.\n\n💎 Посмотри VIP-тарифы в /planes и начни создавать свои ссылки.\n\n• Если у тебя есть Уникальный ключ: `/activar ТВОЙ_КЛЮЧ`\n• Если у тебя уже есть доступ: `/menu`\n• Тарифы VIP: `/planes`\n\n📢 Новости и обновления: @sub2unlockt",
 choose_language: "🌐 *Elige tu idioma / Choose your language / Выберите язык / अपनी भाषा चुनें:*",
 language_set: "✅ Язык установлен: *Русский*.",
 menu_title: "👤 *Меню создателя*\n\nЧто ты хочешь сделать?",
@@ -589,7 +589,7 @@ bienvenida_removed: "✅ Приветственное сообщение уда�
 },
 
 hi: {
-start_welcome: "👋 नमस्ते! मैं लिंक वेरिफिकेशन सिस्टम हूँ।\n\n🔒 यह बॉट सिर्फ प्राइवेट एक्सेस के लिए है।\n\n• अगर आपके पास यूनिक की है: `/activar आपका_की`\n• अगर आपके पास पहले से एक्सेस है: `/menu`\n• VIP प्लान देखें: `/planes`",
+start_welcome: "👋 नमस्ते! मैं लिंक वेरिफिकेशन सिस्टम हूँ।\n\n💎 /planes में VIP प्लान देखें और अपने लिंक बनाना शुरू करें।\n\n• अगर आपके पास यूनिक की है: `/activar आपका_की`\n• अगर आपके पास पहले से एक्सेस है: `/menu`\n• VIP प्लान देखें: `/planes`\n\n📢 समाचार और अपडेट: @sub2unlockt",
 choose_language: "🌐 *Elige tu idioma / Choose your language / Выберите язык / अपनी भाषा चुनें:*",
 language_set: "✅ भाषा *हिन्दी* पर सेट की गई।",
 menu_title: "👤 *क्रिएटर मेनू*\n\nआप क्या करना चाहते हैं?",
