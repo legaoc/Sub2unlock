@@ -179,7 +179,7 @@ bienvenida_removed: "✅ Mensaje de bienvenida eliminado.",
 },
 
 en: {
-start_welcome: "👋 Hello! I’m the link verification system.\n\n💎 Check out the VIP plans in /planes and start creating your links.\n\n• If you have a Unique Key: `/activate YOUR_KEY`\n• If you already have access: `/menu`\n\n\n📢 News and updates: @sub2unlockt• See VIP plans: `/planes`",
+start_welcome: "👋 Hello! I’m the link verification system.\n\n💎 Check out the VIP plans in /planes and start creating your links.\n\n• If you have a Unique Key: `/activate YOUR_KEY`\n• If you already have access: `/menu`\n• See VIP plans: `/planes`\n\n📢 News and updates: @sub2unlockt",
 choose_language: "🌐 *Elige tu idioma / Choose your language / Выберите язык / अपनी भाषा चुनें:*",
 language_set: "✅ Language set to *English*.",
 menu_title: "👤 *Creator Menu*\n\nWhat would you like to do?",
