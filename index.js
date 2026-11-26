@@ -15,26 +15,26 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 const COMANDOS_MENU = [
 { command: "start", description: "Iniciar el bot y elegir idioma" },
 { command: "menu", description: "Mi panel de creador" },
-{ command: "activar", description: "Canjear una clave VIP" },
-{ command: "idioma", description: "Cambiar idioma" },
-{ command: "cancelar", description: "Cancelar la creación de un enlace" },
-{ command: "planes", description: "Ver planes VIP y pagar con Stars" },
+{ command: "activate", description: "Canjear una clave VIP" },
+{ command: "language", description: "Cambiar idioma" },
+{ command: "cancel", description: "Cancelar la creación de un enlace" },
+{ command: "plans", description: "Ver planes VIP y pagar con Stars" },
 ];
 const COMANDOS_MENU_RU = [
 { command: "start", description: "Запустить бота и выбрать язык" },
 { command: "menu", description: "Моя панель создателя" },
-{ command: "activar", description: "Использовать VIP-ключ" },
-{ command: "idioma", description: "Сменить язык" },
-{ command: "cancelar", description: "Отменить создание ссылки" },
-{ command: "planes", description: "Посмотреть VIP-тарифы и оплатить Stars" },
+{ command: "activate", description: "Использовать VIP-ключ" },
+{ command: "language", description: "Сменить язык" },
+{ command: "cancel", description: "Отменить создание ссылки" },
+{ command: "plans", description: "Посмотреть VIP-тарифы и оплатить Stars" },
 ];
 const COMANDOS_MENU_HI = [
 { command: "start", description: "बॉट शुरू करें और भाषा चुनें" },
 { command: "menu", description: "मेरा क्रिएटर पैनल" },
-{ command: "activar", description: "VIP कुंजी रिडीम करें" },
-{ command: "idioma", description: "भाषा बदलें" },
-{ command: "cancelar", description: "लिंक बनाना रद्द करें" },
-{ command: "planes", description: "VIP प्लान देखें और Stars से भुगतान करें" },
+{ command: "activate", description: "VIP कुंजी रिडीम करें" },
+{ command: "language", description: "भाषा बदलें" },
+{ command: "cancel", description: "लिंक बनाना रद्द करें" },
+{ command: "plans", description: "VIP प्लान देखें और Stars से भुगतान करें" },
 ];
 bot.setMyCommands(COMANDOS_MENU).catch((e) => console.error("Error al poner comandos:", e.message));
 bot.setMyCommands(COMANDOS_MENU, { language_code: "es" }).catch((e) => console.error("Error al poner comandos es:", e.message));
@@ -49,6 +49,7 @@ const estadosClave = {};
 const estadosCupon = {};
 const estadosCuponUsuario = {};
 const estadosBienvenida = {};
+const estadosActivar = {};
 const clavesPasadas = new Map();
 const DIAS_POR_REFERIDO = 3;
 const MINUTOS_AUTOBORRADO = 5;
@@ -754,6 +755,41 @@ reply_markup: { inline_keyboard: botones },
 });
 }
 
+async function canjearClave(chatId, userId, clave, lang, from) {
+if (!await exigeCanalGlobal(chatId, userId, lang)) return;
+try {
+const claveRef = db.collection("claves").doc(clave);
+const claveDoc = await claveRef.get();
+if (!claveDoc.exists) return void bot.sendMessage(chatId, t(lang, "key_not_found"));
+if (claveDoc.data()?.["usada"]) return void bot.sendMessage(chatId, t(lang, "key_used"));
+await claveRef.update({ usada: true, usadaPor: userId });
+const diasClave = claveDoc.data()?.["dias"] ?? 30;
+const planClave = claveDoc.data()?.["plan"] ?? null;
+const venceClave = new Date();
+venceClave.setDate(venceClave.getDate() + diasClave);
+await db.collection("creadores").doc(userId.toString()).set({
+activo: false, pendiente: true,
+...(planClave ? { plan: planClave } : {}),
+fechaIngreso: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
+fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(venceClave),
+});
+await notificarAdminPendiente(userId);
+await logCanal(`🗝️ Clave canjeada: ${nombreUsuario(from)} (ID: ${userId}) — ${clave}${planClave ? ` — Plan ${PLANES[planClave]?.nombre ?? planClave}` : ""}`);
+return void bot.sendMessage(chatId, t(lang, "key_valid"), { parse_mode: "Markdown" });
+} catch (error) {
+console.error(error);
+return void bot.sendMessage(chatId, t(lang, "error_generic"));
+}
+}
+function tecladoBienvenida(l) {
+return { inline_keyboard: [
+[{ text: t(l, "welcome_activate_btn"), callback_data: "activar_clave" }],
+[{ text: t(l, "trial_btn"), callback_data: "probar_24h" }],
+[{ text: t(l, "planes_btn"), callback_data: "planes_ver" }],
+[{ text: t(l, "menu_support"), callback_data: "soporte" }],
+] };
+}
+
 bot.on("message", async (msg) => {
 const chatId = msg.chat.id;
 const texto = msg.text ?? "";
@@ -890,7 +926,7 @@ return void bot.sendMessage(chatId, t(lang, "access_denied"), { parse_mode: "Mar
 return void mostrarMenuCreador(chatId, lang);
 }
 
-if (texto === "/planes") {
+if (texto === "/plans" || texto === "/planes") {
 if (!await exigeCanalGlobal(chatId, userId, lang)) return;
 return void mostrarPlanes(chatId, userId, lang);
 }
@@ -908,37 +944,24 @@ return void bot.sendMessage(chatId, t(lang, "key_error"));
 }
 }
 
-if (texto.startsWith("/activar ") || texto.startsWith("/activate ")) {
-if (!await exigeCanalGlobal(chatId, userId, lang)) return;
+if (texto.startsWith("/activate ") || texto.startsWith("/activar ")) {
 const clave = texto.split(" ")[1];
-try {
-const claveRef = db.collection("claves").doc(clave);
-const claveDoc = await claveRef.get();
-if (!claveDoc.exists) return void bot.sendMessage(chatId, t(lang, "key_not_found"));
-if (claveDoc.data()?.["usada"]) return void bot.sendMessage(chatId, t(lang, "key_used"));
-await claveRef.update({ usada: true, usadaPor: userId });
-const diasClave = claveDoc.data()?.["dias"] ?? 30;
-const planClave = claveDoc.data()?.["plan"] ?? null;
-const venceClave = new Date();
-venceClave.setDate(venceClave.getDate() + diasClave);
-await db.collection("creadores").doc(userId.toString()).set({
-activo: false, pendiente: true,
-...(planClave ? { plan: planClave } : {}),
-fechaIngreso: firebaseAdmin.firestore.FieldValue.serverTimestamp(),
-fechaVencimiento: firebaseAdmin.firestore.Timestamp.fromDate(venceClave),
-});
-await notificarAdminPendiente(userId);
-await logCanal(`🗝️ Clave canjeada: ${nombreUsuario(msg.from)} (ID: ${userId}) — ${clave}${planClave ? ` — Plan ${PLANES[planClave]?.nombre ?? planClave}` : ""}`);
-return void bot.sendMessage(chatId, t(lang, "key_valid"), { parse_mode: "Markdown" });
-} catch (error) {
-console.error(error);
-return void bot.sendMessage(chatId, t(lang, "error_generic"));
-}
+return void canjearClave(chatId, userId, clave, lang, msg.from);
 }
 
 if (texto === "/cancelar" || texto === "/cancel") {
+const habiaActivar = !!estadosActivar[chatId];
+if (estadosActivar[chatId]) delete estadosActivar[chatId];
 if (estadosCreacion[chatId]) { delete estadosCreacion[chatId]; return void bot.sendMessage(chatId, t(lang, "cancel_ok")); }
+if (habiaActivar) return void bot.sendMessage(chatId, t(lang, "cancel_ok"));
 return void bot.sendMessage(chatId, t(lang, "cancel_none"));
+}
+
+if (estadosActivar[chatId] && texto && !texto.startsWith("/")) {
+delete estadosActivar[chatId];
+const clave = texto.trim().toUpperCase();
+await canjearClave(chatId, userId, clave, lang, msg.from);
+return;
 }
 
 if (estadosClave[chatId] && texto && !texto.startsWith("/")) {
@@ -1085,6 +1108,7 @@ const messageId = query.message?.message_id;
 const userId = query.from.id;
 const data = query.data ?? "";
 if (!chatId || !messageId) return;
+if (data !== "activar_clave") delete estadosActivar[chatId];
 void bot.answerCallbackQuery(query.id);
 const lang = await getLang(userId);
 
@@ -1107,11 +1131,7 @@ return;
 }
 await bot.editMessageText(t(newLang, "language_set") + "\n\n" + t(newLang, "start_welcome"), {
 chat_id: chatId, message_id: messageId, parse_mode: "Markdown",
-reply_markup: { inline_keyboard: [
-[{ text: t(newLang, "trial_btn"), callback_data: "probar_24h" }],
-[{ text: t(newLang, "planes_btn"), callback_data: "planes_ver" }],
-[{ text: t(newLang, "menu_support"), callback_data: "soporte" }],
-] },
+reply_markup: tecladoBienvenida(newLang),
 });
 return;
 }
@@ -1182,8 +1202,16 @@ return;
 }
 
 if (data === "soporte") {
+if (estadosActivar[chatId]) delete estadosActivar[chatId];
 estadosSoporte[chatId] = true;
 await bot.sendMessage(chatId, t(lang, "support_ask"), { parse_mode: "Markdown" });
+return;
+}
+
+if (data === "activar_clave") {
+if (estadosSoporte[chatId]) delete estadosSoporte[chatId];
+estadosActivar[chatId] = true;
+await bot.sendMessage(chatId, t(lang, "activate_ask_key"), { parse_mode: "Markdown" });
 return;
 }
 
@@ -1199,7 +1227,7 @@ await bot.sendMessage(chatId, t(lang, "global_not_yet", faltantes.join(", ")));
 return;
 }
 await bot.sendMessage(chatId, t(lang, "global_ok"));
-await bot.sendMessage(chatId, t(lang, "start_welcome"), { parse_mode: "Markdown" });
+await bot.sendMessage(chatId, t(lang, "start_welcome"), { parse_mode: "Markdown", reply_markup: tecladoBienvenida(lang) });
 return;
 }
 
